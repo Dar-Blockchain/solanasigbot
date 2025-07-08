@@ -97,6 +97,7 @@ const config = {
   // buyAmount: parseFloat(process.env.BUY_AMOUNT) || 0.08,
   // slippage: parseInt(process.env.SLIPPAGE) || 10,
   minLiquidity: parseInt(process.env.MIN_LIQUIDITY) || 10000,
+  requirePositivePriceChange: true, // Only process tokens with positive 24h price change
   // stopLoss: 0.95,
   // takeProfit: 1.25,
   // minScore: 60,
@@ -461,6 +462,17 @@ async function monitorBoostedTokens() {
 
         if (!tokenData) continue;
         
+        // Filter: Only process tokens with positive 24h price change (if enabled)
+        const priceChange24h = tokenData.priceChange?.h24 || 0;
+        if (config.requirePositivePriceChange && priceChange24h <= 0) {
+          console.log(`❌ ${tokenData.baseToken?.symbol} has negative/zero 24h price change (${priceChange24h.toFixed(2)}%) - skipping`);
+          // Still mark as processed to avoid checking again
+          state.processedTokens.add(tokenAddress);
+          continue;
+        }
+        
+        console.log(`✅ ${tokenData.baseToken?.symbol} has positive 24h price change: +${priceChange24h.toFixed(2)}%`);
+        
         // Check if token has Meteora pool
         const meteoraPair = await checkMeteoraPool(tokenAddress);
         
@@ -505,6 +517,7 @@ async function main() {
   console.log('🤖 Starting Meteora Pool Signal Bot...');
   console.log(`📢 Sending signals to: ${CHANNEL_USERNAME}`);
   console.log(`💧 Min Liquidity Filter: $${config.minLiquidity.toLocaleString()}`);
+  console.log(`📈 24h Price Change Filter: ${config.requirePositivePriceChange ? 'Positive only' : 'Disabled'}`);
   
   // Test channel access with timeout
   console.log('🔍 Testing channel connection...');
