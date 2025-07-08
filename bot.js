@@ -124,6 +124,31 @@ const state = {
 // ==============================
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Axios with timeout wrapper
+async function axiosWithTimeout(config, timeoutMs = 15000) {
+  const source = axios.CancelToken.source();
+  
+  const timeout = setTimeout(() => {
+    source.cancel(`Request timeout after ${timeoutMs}ms`);
+  }, timeoutMs);
+  
+  try {
+    const response = await axios({
+      ...config,
+      cancelToken: source.token,
+      timeout: timeoutMs
+    });
+    clearTimeout(timeout);
+    return response;
+  } catch (error) {
+    clearTimeout(timeout);
+    if (axios.isCancel(error)) {
+      throw new Error(`Request timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  }
+}
+
 // async function getSPLTokenBalance(tokenMintAddress) {
 //   const ownerPublicKey = wallet.publicKey;
 //   const tokenMintPubkey = new PublicKey(tokenMintAddress);
@@ -141,8 +166,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // ==============================
 async function checkMeteoraPool(tokenAddress) {
   try {
+    console.log(`🔍 Checking Meteora pool for ${tokenAddress}...`);
     // Check if token has a Meteora pool by searching for pairs
-    const response = await axios.get(`https://api.dexscreener.com/token-pairs/v1/solana/${tokenAddress}`);
+    const response = await axiosWithTimeout({
+      method: 'get',
+      url: `https://api.dexscreener.com/token-pairs/v1/solana/${tokenAddress}`
+    }, 10000);
     const pairs = response.data;
     
     if (!pairs || pairs.length === 0) return null;
@@ -156,7 +185,7 @@ async function checkMeteoraPool(tokenAddress) {
     
     return meteoraPair;
   } catch (error) {
-    console.error(`Error checking Meteora pool for ${tokenAddress}:`, error.message);
+    console.error(`❌ Error checking Meteora pool for ${tokenAddress}:`, error.message);
     return null;
   }
 }
@@ -166,13 +195,18 @@ async function checkMeteoraPool(tokenAddress) {
 // ==============================
 async function checkTokenSafety(tokenAddress) {
   try {
-    const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report/summary`);
+    console.log(`🛡️ Checking safety for ${tokenAddress}...`);
+    const response = await axiosWithTimeout({
+      method: 'get',
+      url: `https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report/summary`
+    }, 10000);
     await sleep(1000);
     const score = response.data.score || 0;
     const isSafe = score <= 400;
+    console.log(`✅ Safety check complete: ${score}/1000 (${isSafe ? 'SAFE' : 'RISKY'})`);
     return { isSafe, score };
   } catch (error) {
-    console.error('RugCheck error:', error.message);
+    console.error('❌ RugCheck error:', error.message);
     return { isSafe: false, score: null };
   }
 }
@@ -182,26 +216,42 @@ async function checkTokenSafety(tokenAddress) {
 // ==============================
 async function fetchBoostedTokens() {
   try {
-    const response = await axios.get('https://api.dexscreener.com/token-boosts/latest/v1');
-    console.log(response.data); 
-   
-    return response.data
+    console.log('🔍 Fetching boosted tokens...');
+    const response = await axiosWithTimeout({
+      method: 'get',
+      url: 'https://api.dexscreener.com/token-boosts/latest/v1'
+    }, 10000);
+    
+    const newTokens = response.data
       .filter(p => p.chainId === 'solana')
       .filter(p => !state.processedTokens.has(p.address));
+    
+    console.log(`✅ Found ${response.data.length} total boosted tokens, ${newTokens.length} new ones`);
+    return newTokens;
   } catch (error) {
-    console.error('Error fetching boosted tokens:', error.message);
+    console.error('❌ Error fetching boosted tokens:', error.message);
     return [];
   }
 }
 
 async function fetchTokenPairDetails(tokenAddress) {
   try {
-    const response = await axios.get(`https://api.dexscreener.com/token-pairs/v1/solana/${tokenAddress}`);
+    console.log(`📊 Fetching token pair details for ${tokenAddress}...`);
+    const response = await axiosWithTimeout({
+      method: 'get',
+      url: `https://api.dexscreener.com/token-pairs/v1/solana/${tokenAddress}`
+    }, 10000);
     await sleep(1000);
-    console.log(response.data);
+    
+    if (!response.data || response.data.length === 0) {
+      console.log(`❌ No pair data found for ${tokenAddress}`);
+      return null;
+    }
+    
+    console.log(`✅ Found pair data for ${tokenAddress}`);
     return response.data[0];
   } catch (error) {
-    console.error(`Error fetching pair details for ${tokenAddress}:`, error.message);
+    console.error(`❌ Error fetching pair details for ${tokenAddress}:`, error.message);
     return null;
   }
 }
@@ -443,68 +493,108 @@ async function sendMeteoraSignal(tokenData, meteoraPair, safetyScore = null) {
 // ==============================
 async function monitorBoostedTokens() {
   console.log('🔍 Starting Meteora pool monitoring for signals...');
+  let cycleCount = 0;
   
   while (true) {
+    const cycleStartTime = Date.now();
+    cycleCount++;
+    
     try {
-      const boostedTokens = await fetchBoostedTokens();
-      console.log(`Found ${boostedTokens.length} new boosted tokens`);
+      console.log(`\n🔄 Starting monitoring cycle #${cycleCount} at ${new Date().toLocaleTimeString()}`);
       
-      for (const token of boostedTokens) {
-        const tokenAddress = token.tokenAddress || token.address;
+      const boostedTokens = await fetchBoostedTokens();
+      
+      if (boostedTokens.length === 0) {
+        console.log('⏳ No new boosted tokens to process');
+      } else {
+        console.log(`📝 Processing ${boostedTokens.length} new boosted tokens...`);
         
-        // Skip if already processed
-        if (state.processedTokens.has(tokenAddress)) continue;
-        
-        
-        // Get detailed token data
-        const tokenData = await fetchTokenPairDetails(tokenAddress);
-        console.log(`Checking ${token.baseToken?.symbol || 'Unknown'} for Meteora pools...`);
-
-        if (!tokenData) continue;
-        
-        // Filter: Only process tokens with positive 24h price change (if enabled)
-        const priceChange24h = tokenData.priceChange?.h24 || 0;
-        if (config.requirePositivePriceChange && priceChange24h <= 0) {
-          console.log(`❌ ${tokenData.baseToken?.symbol} has negative/zero 24h price change (${priceChange24h.toFixed(2)}%) - skipping`);
-          // Still mark as processed to avoid checking again
-          state.processedTokens.add(tokenAddress);
-          continue;
-        }
-        
-        console.log(`✅ ${tokenData.baseToken?.symbol} has positive 24h price change: +${priceChange24h.toFixed(2)}%`);
-        
-        // Check if token has Meteora pool
-        const meteoraPair = await checkMeteoraPool(tokenAddress);
-        
-        if (meteoraPair) {
-          console.log(`✅ Found Meteora pool for ${tokenData.baseToken?.symbol}!`);
+        for (let i = 0; i < boostedTokens.length; i++) {
+          const token = boostedTokens[i];
+          const tokenAddress = token.tokenAddress || token.address;
           
-          // Check token safety before sending signal
-          console.log(`🔍 Checking token safety for ${tokenData.baseToken?.symbol}...`);
-          const { isSafe, score } = await checkTokenSafety(tokenAddress);
-          
-          if (isSafe) {
-            console.log(`✅ Token ${tokenData.baseToken?.symbol} passed safety check`);
-            await sendMeteoraSignal(tokenData, meteoraPair, score);
-          } else {
-            console.log(`❌ Token ${tokenData.baseToken?.symbol} failed safety check - skipping signal`);
+          try {
+            console.log(`\n[${i + 1}/${boostedTokens.length}] Processing token: ${tokenAddress}`);
+            
+            // Skip if already processed
+            if (state.processedTokens.has(tokenAddress)) {
+              console.log('⏭️  Already processed, skipping...');
+              continue;
+            }
+            
+            // Get detailed token data with timeout protection
+            const tokenData = await fetchTokenPairDetails(tokenAddress);
+            if (!tokenData) {
+              console.log('❌ Failed to get token data, marking as processed');
+              state.processedTokens.add(tokenAddress);
+              continue;
+            }
+            
+            const symbol = tokenData.baseToken?.symbol || 'Unknown';
+            console.log(`🔍 Analyzing token: ${symbol}`);
+            
+            // Filter: Only process tokens with positive 24h price change (if enabled)
+            const priceChange24h = tokenData.priceChange?.h24 || 0;
+            if (config.requirePositivePriceChange && priceChange24h <= 0) {
+              console.log(`❌ ${symbol} has negative/zero 24h price change (${priceChange24h.toFixed(2)}%) - skipping`);
+              state.processedTokens.add(tokenAddress);
+              continue;
+            }
+            
+            console.log(`✅ ${symbol} has positive 24h price change: +${priceChange24h.toFixed(2)}%`);
+            
+            // Check if token has Meteora pool with timeout protection
+            const meteoraPair = await checkMeteoraPool(tokenAddress);
+            
+            if (meteoraPair) {
+              console.log(`✅ Found Meteora pool for ${symbol}!`);
+              
+              // Check token safety before sending signal with timeout protection
+              const { isSafe, score } = await checkTokenSafety(tokenAddress);
+              
+              if (isSafe) {
+                console.log(`✅ ${symbol} passed safety check - sending signal!`);
+                await sendMeteoraSignal(tokenData, meteoraPair, score);
+              } else {
+                console.log(`❌ ${symbol} failed safety check - skipping signal`);
+              }
+            } else {
+              console.log(`❌ No Meteora pool found for ${symbol}`);
+            }
+            
+            // Mark as processed
+            state.processedTokens.add(tokenAddress);
+            
+            // Rate limiting between tokens
+            await sleep(2000);
+            
+          } catch (tokenError) {
+            console.error(`❌ Error processing token ${tokenAddress}:`, tokenError.message);
+            // Mark as processed even on error to avoid infinite retries
+            state.processedTokens.add(tokenAddress);
+            await sleep(1000);
           }
-        } else {
-          console.log(`❌ No Meteora pool found for ${tokenData.baseToken?.symbol}`);
         }
-        
-        // Mark as processed
-        state.processedTokens.add(tokenAddress);
-        
-        // Rate limiting
-        await sleep(2000);
       }
       
-      console.log('✅ Completed monitoring cycle');
+      const cycleTime = ((Date.now() - cycleStartTime) / 1000).toFixed(1);
+      console.log(`✅ Completed monitoring cycle #${cycleCount} in ${cycleTime}s`);
+      console.log(`💾 Total processed tokens: ${state.processedTokens.size}`);
+      
+      // Clean up old tokens from memory (keep last 1000)
+      if (state.processedTokens.size > 1000) {
+        const tokensArray = Array.from(state.processedTokens);
+        const keepTokens = tokensArray.slice(-800); // Keep last 800
+        state.processedTokens = new Set(keepTokens);
+        console.log('🧹 Cleaned up old tokens from memory');
+      }
+      
+      console.log('⏳ Waiting 30 seconds before next cycle...\n');
       await sleep(30000); // Check every 30 seconds
       
     } catch (error) {
-      console.error('Error in monitoring loop:', error);
+      console.error('❌ Critical error in monitoring loop:', error.message);
+      console.log('🔄 Attempting to recover in 60 seconds...');
       await sleep(60000); // Wait 1 minute on error
     }
   }
@@ -518,6 +608,8 @@ async function main() {
   console.log(`📢 Sending signals to: ${CHANNEL_USERNAME}`);
   console.log(`💧 Min Liquidity Filter: $${config.minLiquidity.toLocaleString()}`);
   console.log(`📈 24h Price Change Filter: ${config.requirePositivePriceChange ? 'Positive only' : 'Disabled'}`);
+  console.log(`⏱️  Anti-freeze Protection: Enabled (10s timeouts)`);
+  console.log(`💓 Heartbeat: Every 5 minutes`);
   
   // Test channel access with timeout
   console.log('🔍 Testing channel connection...');
@@ -566,7 +658,27 @@ process.on('SIGINT', () => {
 });
 
 process.on('unhandledRejection', (error) => {
-  console.error('Unhandled promise rejection:', error);
+  console.error('❌ Unhandled promise rejection:', error);
+  console.log('🔄 Bot will continue running...');
 });
 
-main().catch(console.error);
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught exception:', error);
+  console.log('🔄 Bot will continue running...');
+});
+
+// Heartbeat to show bot is alive
+setInterval(() => {
+  const uptime = process.uptime();
+  const hours = Math.floor(uptime / 3600);
+  const minutes = Math.floor((uptime % 3600) / 60);
+  console.log(`💓 Bot heartbeat - Uptime: ${hours}h ${minutes}m | Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+}, 5 * 60 * 1000); // Every 5 minutes
+
+main().catch((error) => {
+  console.error('❌ Critical error in main:', error);
+  console.log('🔄 Restarting in 10 seconds...');
+  setTimeout(() => {
+    main().catch(console.error);
+  }, 10000);
+});
