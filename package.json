@@ -1,0 +1,33 @@
+{
+  "name": "meteora-pool-monitor-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that monitors DexScreener boosted tokens for Meteora pools",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "websocket": "node index.js",
+    "get-chat-id": "node get-chat-id.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "node-fetch": "^2.7.0",
+    "@solana/web3.js": "^1.87.6",
+    "@solana/spl-token": "^0.3.9",
+    "bs58": "^5.0.0",
+    "bn.js": "^5.2.1",
+    "ws": "^8.14.2"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "solana",
+    "meteora",
+    "dexscreener",
+    "trading"
+  ],
+  "author": "",
+  "license": "MIT"
+}
