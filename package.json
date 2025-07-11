@@ -1,10 +1,12 @@
 {
   "name": "meteora-pool-monitor-bot",
   "version": "1.0.0",
-  "description": "Telegram bot that monitors DexScreener boosted tokens for Meteora pools",
+  "description": "Telegram bot that monitors Meteora pools with real-time GraphQL subscriptions and DexScreener API",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
+    "monitor": "node index.js",
+    "graphql": "node index.js",
     "websocket": "node index.js",
     "get-chat-id": "node get-chat-id.js",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -17,6 +19,7 @@
     "bs58": "^5.0.0",
     "cheerio": "^1.1.0",
     "dotenv": "^16.3.1",
+    "eventsource": "^2.0.2",
     "node-fetch": "^2.7.0",
     "node-telegram-bot-api": "^0.64.0",
     "redis": "^5.6.0",
