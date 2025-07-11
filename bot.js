@@ -180,9 +180,17 @@ async function markTokenAsProcessed(tokenAddress, metadata = {}) {
       ...metadata
     };
     
+    // Convert all values to strings for Redis
+    const stringifiedData = {};
+    for (const [key, value] of Object.entries(tokenData)) {
+      if (value !== null && value !== undefined) {
+        stringifiedData[key] = String(value);
+      }
+    }
+    
     await redisClient.hSet(
       `${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`,
-      tokenData
+      stringifiedData
     );
     
     // Set expiration for metadata (30 days)
