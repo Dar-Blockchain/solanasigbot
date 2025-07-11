@@ -47,7 +47,7 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const CHANNEL_USERNAME = '@memesigsol'; // Channel username
 
 const GECKOTERMINAL_API_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
-const MAX_PAGES = 100; // Monitor 100 pages
+const MAX_PAGES = 10; // Monitor 100 pages
 const REQUEST_DELAY = 1000; // 1 second delay between requests
 const CYCLE_DELAY = 60000; // 60 seconds between monitoring cycles
 
