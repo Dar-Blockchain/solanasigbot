@@ -3,7 +3,6 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const cheerio = require('cheerio');
 const redis = require('redis');
 // const BN = require('bn.js');
 // const fetch = require('node-fetch');
@@ -292,6 +291,8 @@ function isTokenNewEnough(ageString) {
   return isNewEnough;
 }
 
+
+
 // Axios with timeout wrapper
 async function axiosWithTimeout(config, timeoutMs = 15000) {
   const source = axios.CancelToken.source();
@@ -433,295 +434,171 @@ async function checkTokenSafety(tokenAddress) {
 // ==============================
 async function fetchMeteoraPairs() {
   try {
-    console.log('🔍 Fetching Meteora pairs from DexScreener...');
-    console.log('📍 Target URL: https://dexscreener.com/solana/meteora?rankBy=pairAge&order=asc');
+    console.log('🔍 Fetching Meteora pairs from DexScreener Search API...');
+    console.log('📍 Target URL: https://api.dexscreener.com/latest/dex/search/?q=meteora');
     
-    // Try the DexScreener search API first (this actually works)
-    console.log('🚀 Method 1: Trying DexScreener search API...');
-    try {
-      const searchResponse = await axiosWithTimeout({
-        method: 'get',
-        url: 'https://api.dexscreener.com/latest/dex/search/?q=meteora',
-        params: {
-          chains: 'solana'
-        }
-      }, 15000);
-      console.log(searchResponse.data);
-      console.log('📊 Search API Response Status:', searchResponse.status);
-      
-      if (searchResponse.data && searchResponse.data.pairs) {
-        console.log(`📊 Search API returned ${searchResponse.data.pairs.length} total pairs`);
-        
-        const meteoraPairs = searchResponse.data.pairs.filter(p => 
-          p.dexId === 'meteora' || 
-          p.labels?.includes('meteora') ||
-          p.url?.includes('meteora')
-        );
-        
-        console.log(`✅ Filtered to ${meteoraPairs.length} Meteora pairs from search API`);
-        console.log(meteoraPairs,'.........');
-        
-        // Filter by age (6 hours or newer)
-        const recentPairs = meteoraPairs.filter(p => {
-          // For API results, we might need to fetch individual pair details to get age
-          // For now, we'll include all and filter later during detailed fetch
-          return true;
-        });
-        
-        console.log(`📊 After age filter: ${recentPairs.length}/${meteoraPairs.length} pairs are recent enough`);
-        
-        if (recentPairs.length > 0) {
-          // Log sample pair structure
-          console.log('📋 Sample pair structure:', JSON.stringify(recentPairs[0], null, 2).substring(0, 500) + '...');
-          
-          // Filter out already processed tokens using Redis
-          const validPairs = recentPairs.filter(p => p.baseToken && p.baseToken.address);
-          const newTokens = [];
-          
-          for (const pair of validPairs) {
-            const isProcessed = await isTokenProcessed(pair.baseToken.address);
-            if (!isProcessed) {
-              newTokens.push({
-                tokenAddress: pair.baseToken.address,
-                address: pair.baseToken.address,
-                chainId: 'solana',
-                pairData: pair
-              });
-            }
-          }
-          
-          console.log(`✅ Found ${recentPairs.length} total recent Meteora pairs via search API, ${newTokens.length} new ones`);
-          return newTokens;
-        }
-      } else {
-        console.log('❌ Search API response does not contain pairs data');
-        console.log('📊 Search API response structure:', Object.keys(searchResponse.data || {}));
-      }
-    } catch (apiError) {
-      console.log('⚠️  Search API failed, trying web scraping...');
-      console.log('❌ API Error:', apiError.message);
-    }
-    
-    // Fallback to web scraping
-    console.log('🚀 Method 2: Web scraping the DexScreener page...');
     const response = await axiosWithTimeout({
       method: 'get',
-      url: 'https://dexscreener.com/solana/meteora?rankBy=pairAge&order=asc',
+      url: 'https://api.dexscreener.com/latest/dex/search/?q=meteora',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'max-age=0',
-        'Connection': 'keep-alive',
-        'DNT': '1',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"'
       }
-    }, 20000);
+    }, 15000);
     
-    console.log('📊 Scraping Response Status:', response.status);
-    console.log('📊 Scraping Response Size:', response.data?.length || 0, 'characters');
-    console.log('📊 Content Type:', response.headers['content-type']);
+    console.log('📊 API Response Status:', response.status);
     
-    const $ = cheerio.load(response.data);
-    
-    // Parse the HTML table containing Meteora pairs
-    let pairsData = [];
-    
-        console.log('🔍 Method 2a: Parsing HTML table rows...');
-    const tableRows = $('.ds-dex-table-row');
-    console.log(`📊 Found ${tableRows.length} table rows`);
-    
-    // Convert to array and process with async/await
-    const tableRowsArray = tableRows.toArray();
-    
-    for (let i = 0; i < tableRowsArray.length; i++) {
-      try {
-        const elem = tableRowsArray[i];
-        const $row = $(elem);
-        const href = $row.attr('href');
-        
-        if (!href) continue;
-        
-        // Extract pair address from href (e.g., "/solana/ba5rfso67fnkb4cnwjsggpjpuq8xhxs4kuswbrzdvcw2")
-        const pairAddress = href.replace('/solana/', '');
-        
-        // Extract token information
-        const baseTokenSymbol = $row.find('.ds-dex-table-row-base-token-symbol').text().trim();
-        const quoteTokenSymbol = $row.find('.ds-dex-table-row-quote-token-symbol').text().trim();
-        const baseTokenName = $row.find('.ds-dex-table-row-base-token-name-text').text().trim();
-        
-        // Extract base token address from image src if available
-        let baseTokenAddress = pairAddress; // fallback to pair address
-        const tokenImg = $row.find('.ds-dex-table-row-token-icon-img');
-        if (tokenImg.length > 0) {
-          const imgSrc = tokenImg.attr('src');
-          if (imgSrc) {
-            // Extract token address from image URL like: 
-            // https://dd.dexscreener.com/ds-data/tokens/solana/4TBi66vi32S7J8X1A6eWfaLHYmUXu7CStcEmsJQdpump.png
-            const tokenMatch = imgSrc.match(/tokens\/solana\/([A-Za-z0-9]+)\.png/);
-            if (tokenMatch && tokenMatch[1]) {
-              baseTokenAddress = tokenMatch[1];
-            }
-          }
-        }
-        
-        // Extract price (handle the special formatting)
-        let priceText = $row.find('.ds-dex-table-row-col-price .chakra-text').first().text().trim();
-        // Remove the special span content and clean up price
-        priceText = priceText.replace(/\$0\.0.*?(\d+)/, (match, digits) => `$0.${'0'.repeat(7)}${digits}`);
-        const price = parseFloat(priceText.replace('$', '')) || 0;
-        
-        // Extract other data
-        const pairAge = $row.find('.ds-dex-table-row-col-pair-age span').text().trim();
-        const buys = parseInt($row.find('.ds-dex-table-row-col-buys').text().trim()) || 0;
-        const sells = parseInt($row.find('.ds-dex-table-row-col-sells').text().trim()) || 0;
-        const volume = $row.find('.ds-dex-table-row-col-volume').text().trim();
-        const makers = parseInt($row.find('.ds-dex-table-row-col-makers').text().trim()) || 0;
-        
-        // Extract price changes
-        const priceChange5m = $row.find('.ds-dex-table-row-col-price-change-m5 .ds-change-perc').text().trim();
-        const priceChange1h = $row.find('.ds-dex-table-row-col-price-change-h1 .ds-change-perc').text().trim();
-        const priceChange6h = $row.find('.ds-dex-table-row-col-price-change-h6 .ds-change-perc').text().trim();
-        const priceChange24h = $row.find('.ds-dex-table-row-col-price-change-h24 .ds-change-perc').text().trim();
-        
-        // Extract liquidity and market cap
-        const liquidity = $row.find('.ds-dex-table-row-col-liquidity').text().trim();
-        const marketCap = $row.find('.ds-dex-table-row-col-market-cap').text().trim();
-        
-        // Check if this is a Meteora pair (look for DYN badge or other indicators)
-        const isDynamic = $row.find('.ds-dex-table-row-badge-label').text().includes('DYN');
-        
-        if (baseTokenSymbol && baseTokenAddress) {
-          // Check if token is new enough (6 hours or less)
-          if (!isTokenNewEnough(pairAge)) {
-            console.log(`⏰ Skipping ${baseTokenSymbol} - too old (${pairAge})`);
-            continue; // Skip this row
-          }
-          
-          console.log(`📊 Found token: ${baseTokenSymbol} (${baseTokenAddress}) - age: ${pairAge}`);
-          
-          // Check for PumpFun/PumpSwap pools
-          const pumpPools = await checkPumpPools(baseTokenAddress);
-          
-          // Create a pair object similar to DexScreener API format
-          const pairData = {
-            chainId: 'solana',
-            dexId: 'meteora',
-            url: `https://dexscreener.com${href}`,
-            pairAddress: pairAddress,
-            baseToken: {
-              address: baseTokenAddress,
-              name: baseTokenName || baseTokenSymbol,
-              symbol: baseTokenSymbol
-            },
-            quoteToken: {
-              symbol: quoteTokenSymbol
-            },
-            priceUsd: price.toString(),
-            pairAge: pairAge,
-            txns: {
-              h24: {
-                buys: buys,
-                sells: sells
-              }
-            },
-            volume: {
-              h24: parseFloat(volume.replace(/[$,]/g, '')) || 0
-            },
-            priceChange: {
-              m5: parseFloat(priceChange5m.replace('%', '')) || 0,
-              h1: parseFloat(priceChange1h.replace('%', '')) || 0,
-              h6: parseFloat(priceChange6h.replace('%', '')) || 0,
-              h24: parseFloat(priceChange24h.replace('%', '')) || 0
-            },
-            liquidity: {
-              usd: parseFloat(liquidity.replace(/[$,<]/g, '')) || 0
-            },
-            marketCap: parseFloat(marketCap.replace(/[$,]/g, '')) || 0,
-            isDynamic: isDynamic,
-            labels: isDynamic ? ['meteora'] : [],
-            // Add pump pool information
-            hasPumpFun: pumpPools.hasPumpFun,
-            hasPumpSwap: pumpPools.hasPumpSwap,
-            pumpPools: pumpPools
-          };
-          
-          console.log(`✅ Including ${baseTokenSymbol} - age: ${pairAge}, PumpFun: ${pumpPools.hasPumpFun}, PumpSwap: ${pumpPools.hasPumpSwap}`);
-          pairsData.push(pairData);
-        }
-      } catch (parseError) {
-        console.log(`❌ Failed to parse table row ${i + 1}:`, parseError.message);
-      }
-    }
-    
-    console.log(`✅ Parsed ${pairsData.length} pairs from HTML table`);
-    
-    if (pairsData.length === 0) {
-      console.log('⚠️  No pairs data found in webpage via scraping methods');
-    }
-    
-    if (pairsData.length === 0) {
-      console.log('❌ No Meteora pairs data found via any method');
+    if (!response.data || !response.data.pairs) {
+      console.log('❌ No pairs data found in API response');
       return [];
     }
     
-    console.log('🔄 Processing pairs data...');
+    const allPairs = response.data.pairs;
+    console.log(`📊 Found ${allPairs.length} total pairs from meteora search API`);
     
-    // Log sample pair structure
-    if (pairsData.length > 0) {
-      console.log('📋 Sample pair structure:', JSON.stringify(pairsData[0], null, 2).substring(0, 300) + '...');
-    }
+    // Filter to only Meteora pairs (should already be filtered but double-check)
+    const meteoraPairs = allPairs.filter(pair => 
+      pair.dexId === 'meteora' && 
+      pair.chainId === 'solana' && 
+      pair.baseToken && 
+      pair.baseToken.address
+    );
     
-    const validPairs = pairsData.filter(p => p.baseToken && p.baseToken.address);
-    console.log(`📊 Valid pairs with baseToken: ${validPairs.length}/${pairsData.length}`);
+    console.log(`📊 Filtered to ${meteoraPairs.length} Meteora pairs on Solana`);
     
-    // Filter out already processed tokens using Redis
-    const newTokens = [];
-    let alreadyProcessedCount = 0;
+    // Sort by pair creation date (newest first) to match the HTML page behavior
+    meteoraPairs.sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0));
     
-    for (const pair of validPairs) {
-      const isProcessed = await isTokenProcessed(pair.baseToken.address);
-      if (!isProcessed) {
-        newTokens.push({
-          tokenAddress: pair.baseToken.address,
-          address: pair.baseToken.address,
+    let validPairs = [];
+    
+    // Process each pair
+    for (let i = 0; i < meteoraPairs.length; i++) {
+      const pair = meteoraPairs[i];
+      const tokenAddress = pair.baseToken.address;
+      const symbol = pair.baseToken.symbol || 'Unknown';
+      
+      try {
+        console.log(`\n[${i + 1}/${meteoraPairs.length}] Processing ${symbol} (${tokenAddress})`);
+        
+        // Calculate age from pairCreatedAt timestamp
+        let ageInHours = null;
+        let ageString = 'Unknown';
+        
+        if (pair.pairCreatedAt) {
+          const ageInMs = Date.now() - pair.pairCreatedAt;
+          ageInHours = ageInMs / (1000 * 60 * 60); // Convert to hours
+          
+          if (ageInHours < 1) {
+            const ageInMinutes = Math.floor(ageInMs / (1000 * 60));
+            ageString = `${ageInMinutes}m`;
+          } else if (ageInHours < 24) {
+            const hours = Math.floor(ageInHours);
+            const minutes = Math.floor((ageInHours % 1) * 60);
+            ageString = minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+          } else {
+            const days = Math.floor(ageInHours / 24);
+            ageString = `${days}d`;
+          }
+        }
+        
+        console.log(`⏰ Token age: ${ageString} (${ageInHours ? ageInHours.toFixed(1) + 'h' : 'unknown'})`);
+        
+        // Filter: Check token age (6 hours or newer)
+        if (ageInHours !== null && ageInHours > 6) {
+          console.log(`⏰ ${symbol} is too old (${ageString}) - skipping`);
+          continue;
+        }
+        
+        // Check if already processed in Redis
+        const isProcessed = await isTokenProcessed(tokenAddress);
+        if (isProcessed) {
+          console.log(`📝 ${symbol} already processed - skipping`);
+          continue;
+        }
+        
+        // Check for PumpFun/PumpSwap pools
+        console.log(`🔍 Checking PumpFun/PumpSwap for ${symbol}...`);
+        const pumpPools = await checkPumpPools(tokenAddress);
+        
+        // Filter: Only include tokens that are NOT on PumpFun or PumpSwap
+        if (pumpPools.hasPumpFun || pumpPools.hasPumpSwap) {
+          console.log(`🚫 ${symbol} is on PumpFun: ${pumpPools.hasPumpFun}, PumpSwap: ${pumpPools.hasPumpSwap} - skipping`);
+          await markTokenAsProcessed(tokenAddress, {
+            reason: 'has_pump_pools',
+            symbol,
+            hasPumpFun: pumpPools.hasPumpFun,
+            hasPumpSwap: pumpPools.hasPumpSwap,
+            age: ageString
+          });
+          continue;
+        }
+        
+        console.log(`✅ ${symbol} is Meteora-only (no PumpFun/PumpSwap) - including`);
+        
+        // Add calculated age to pair data
+        const enhancedPair = {
+          ...pair,
+          calculatedAge: ageString,
+          ageInHours: ageInHours,
+          hasPumpFun: false,
+          hasPumpSwap: false,
+          pumpPools: pumpPools
+        };
+        
+        validPairs.push({
+          tokenAddress: tokenAddress,
+          address: tokenAddress,
           chainId: 'solana',
-          pairData: pair
+          pairData: enhancedPair
         });
-      } else {
-        alreadyProcessedCount++;
+        
+        // Add delay between token checks to avoid overwhelming APIs
+        await sleep(1000);
+        
+      } catch (error) {
+        console.error(`❌ Error processing ${symbol}:`, error.message);
+        continue;
       }
     }
     
-    console.log(`📊 Already processed tokens: ${alreadyProcessedCount}`);
-    console.log(`✅ Found ${pairsData.length} total Meteora pairs, ${newTokens.length} new ones to process`);
+    console.log(`\n✅ Found ${validPairs.length} Meteora-only pairs (no PumpFun/PumpSwap) from ${meteoraPairs.length} total`);
+    
+    if (validPairs.length === 0) {
+      console.log('⚠️  No valid Meteora-only pairs found');
+      console.log('💡 All tokens may be on PumpFun/PumpSwap or too old');
+      return [];
+    }
     
     // Log some sample token addresses
-    if (newTokens.length > 0) {
-      console.log('📋 Sample new token addresses:');
-      newTokens.slice(0, 3).forEach((token, index) => {
-        console.log(`   ${index + 1}. ${token.tokenAddress} (${token.pairData?.baseToken?.symbol || 'Unknown'})`);
+    if (validPairs.length > 0) {
+      console.log('📋 Sample Meteora-only tokens:');
+      validPairs.slice(0, 3).forEach((token, index) => {
+        console.log(`   ${index + 1}. ${token.tokenAddress} (${token.pairData?.baseToken?.symbol || 'Unknown'}) - age: ${token.pairData?.calculatedAge}`);
       });
     }
     
-    return newTokens;
+    return validPairs;
     
   } catch (error) {
-    console.error('❌ Critical error fetching Meteora pairs:', error.message);
+    console.error('❌ Critical error fetching Meteora pairs from API:', error.message);
     console.error('📊 Error details:', {
       name: error.name,
       code: error.code,
       response: error.response?.status,
       url: error.config?.url
     });
+    
+    if (error.response?.status === 403) {
+      console.error('🚫 403 Forbidden - DexScreener API is blocking our requests');
+      console.error('💡 This is unusual for the search API - may need to investigate');
+    } else if (error.response?.status === 429) {
+      console.error('⏱️  429 Too Many Requests - Rate limited by API');
+      console.error('💡 Will wait longer before next attempt');
+    } else if (error.code === 'ECONNRESET' || error.code === 'ENOTFOUND') {
+      console.error('🌐 Network connectivity issue');
+    }
+    
     console.log('🔄 Returning empty array, will retry in next cycle...');
     return [];
   }
@@ -985,8 +862,10 @@ async function sendMeteoraSignal(tokenData, meteoraPair, safetyScore = null) {
 // MAIN MONITORING LOOP
 // ==============================
 async function monitorMeteoraPairs() {
-  console.log('🔍 Starting Meteora pairs monitoring for signals...');
+  console.log('🔍 Starting Meteora pairs API monitoring for signals...');
   let cycleCount = 0;
+  let errorCount = 0;
+  let lastErrorType = null;
   
   while (true) {
     const cycleStartTime = Date.now();
@@ -999,7 +878,9 @@ async function monitorMeteoraPairs() {
       
       if (meteoraPairs.length === 0) {
         console.log('⏳ No new Meteora pairs to process');
+        errorCount++; // Increment error count for empty results
       } else {
+        errorCount = 0; // Reset error count on success
         console.log(`📝 Processing ${meteoraPairs.length} new Meteora pairs...`);
         
         for (let i = 0; i < meteoraPairs.length; i++) {
@@ -1110,13 +991,36 @@ async function monitorMeteoraPairs() {
         await cleanupOldTokens();
       }
       
-      console.log('⏳ Waiting 30 seconds before next cycle...\n');
-      await sleep(30000); // Check every 30 seconds
+      // Dynamic wait time based on error count
+      let waitTime = 30000; // Default 30 seconds
+      
+      if (errorCount > 0) {
+        waitTime = Math.min(30000 + (errorCount * 15000), 120000); // Increase wait time, max 2 minutes
+        console.log(`⚠️  ${errorCount} consecutive errors/empty results, waiting ${waitTime/1000}s...`);
+      } else {
+        console.log('⏳ Waiting 30 seconds before next cycle...');
+      }
+      
+      console.log(''); // Empty line for readability
+      await sleep(waitTime);
       
     } catch (error) {
       console.error('❌ Critical error in monitoring loop:', error.message);
-      console.log('🔄 Attempting to recover in 60 seconds...');
-      await sleep(60000); // Wait 1 minute on error
+      errorCount += 5; // Heavily penalize critical errors
+      lastErrorType = error.response?.status || error.code;
+      
+      let recoveryTime = 60000;
+      if (lastErrorType === 403) {
+        recoveryTime = 120000; // Wait 2 minutes for 403 errors
+        console.log('🔄 403 error detected, waiting 2 minutes before retry...');
+      } else if (lastErrorType === 429) {
+        recoveryTime = 180000; // Wait 3 minutes for rate limiting
+        console.log('🔄 Rate limiting detected, waiting 3 minutes before retry...');
+      } else {
+        console.log('🔄 Critical error, attempting to recover in 60 seconds...');
+      }
+      
+      await sleep(recoveryTime);
     }
   }
 }
@@ -1127,8 +1031,9 @@ async function monitorMeteoraPairs() {
 async function main() {
   console.log('🤖 Starting Meteora Pairs Signal Bot...');
   console.log(`📢 Sending signals to: ${CHANNEL_USERNAME}`);
-  console.log(`🔍 Source: DexScreener Meteora pairs (newest first)`);
+  console.log(`🔍 Source: DexScreener Search API (meteora)`);
   console.log(`⏰ Age Filter: Only tokens ≤ 6 hours old`);
+  console.log(`🚫 PumpFun/PumpSwap Filter: Exclude tokens on these DEXs`);
   console.log(`💧 Min Liquidity Filter: $${config.minLiquidity.toLocaleString()}`);
   console.log(`📈 24h Price Change Filter: ${config.requirePositivePriceChange ? 'Positive only' : 'Disabled'}`);
   console.log(`⏱️  Anti-freeze Protection: Enabled (10s timeouts)`);
@@ -1150,7 +1055,7 @@ async function main() {
   console.log('🔍 Testing channel connection...');
   try {
     // Add timeout to prevent hanging
-    const messagePromise = bot.sendMessage(CHANNEL_USERNAME, '🤖 **Meteora Pairs Signal Bot Started!**\n\nMonitoring DexScreener for new Meteora pairs (sorted by age)...\n\n#BotStarted #Meteora #Signals', {
+    const messagePromise = bot.sendMessage(CHANNEL_USERNAME, '🤖 **Meteora Pairs Signal Bot Started!**\n\nMonitoring DexScreener API for new Meteora pairs (≤6h old, no PumpFun/PumpSwap)...\n\n#BotStarted #Meteora #Signals', {
       parse_mode: 'Markdown'
     });
     
