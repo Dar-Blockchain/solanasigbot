@@ -465,7 +465,7 @@ async function fetchMeteoraPairs() {
       pair.baseToken.address
     );
     
-    console.log(`📊 Filtered to ${meteoraPairs.length} Meteora pairs on Solana`);
+    console.log(`📊 Filtered to ${meteoraPairs.length} Meteora pairs on Solana (checking for pump platform graduates)`);
     
     // Sort by pair creation date (newest first) to match the HTML page behavior
     meteoraPairs.sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0));
@@ -521,20 +521,66 @@ async function fetchMeteoraPairs() {
         console.log(`🔍 Checking PumpFun/PumpSwap for ${symbol}...`);
         const pumpPools = await checkPumpPools(tokenAddress);
         
-        // Filter: Only include tokens that are NOT on PumpFun or PumpSwap
-        if (pumpPools.hasPumpFun || pumpPools.hasPumpSwap) {
-          console.log(`🚫 ${symbol} is on PumpFun: ${pumpPools.hasPumpFun}, PumpSwap: ${pumpPools.hasPumpSwap} - skipping`);
+        // Filter: Only include tokens that ARE on PumpFun/PumpSwap AND were created there BEFORE Meteora
+        if (!pumpPools.hasPumpFun && !pumpPools.hasPumpSwap) {
+          console.log(`🚫 ${symbol} is NOT on PumpFun/PumpSwap - skipping (we only signal tokens that graduated from pump platforms)`);
           await markTokenAsProcessed(tokenAddress, {
-            reason: 'has_pump_pools',
+            reason: 'not_on_pump_platforms',
             symbol,
-            hasPumpFun: pumpPools.hasPumpFun,
-            hasPumpSwap: pumpPools.hasPumpSwap,
+            hasPumpFun: false,
+            hasPumpSwap: false,
             age: ageString
           });
           continue;
         }
         
-        console.log(`✅ ${symbol} is Meteora-only (no PumpFun/PumpSwap) - including`);
+        // Check if PumpFun/PumpSwap pools were created BEFORE Meteora pool
+        let isPumpPoolOlder = false;
+        let pumpCreationTime = null;
+        let meteoraCreationTime = pair.pairCreatedAt;
+        
+        // Find the earliest pump pool creation time
+        if (pumpPools.pumpFunPairs && pumpPools.pumpFunPairs.length > 0) {
+          for (const pumpPair of pumpPools.pumpFunPairs) {
+            if (pumpPair.pairCreatedAt) {
+              if (!pumpCreationTime || pumpPair.pairCreatedAt < pumpCreationTime) {
+                pumpCreationTime = pumpPair.pairCreatedAt;
+              }
+            }
+          }
+        }
+        
+        if (pumpPools.pumpSwapPairs && pumpPools.pumpSwapPairs.length > 0) {
+          for (const pumpPair of pumpPools.pumpSwapPairs) {
+            if (pumpPair.pairCreatedAt) {
+              if (!pumpCreationTime || pumpPair.pairCreatedAt < pumpCreationTime) {
+                pumpCreationTime = pumpPair.pairCreatedAt;
+              }
+            }
+          }
+        }
+        
+        // Check if pump pool was created before Meteora pool
+        if (pumpCreationTime && meteoraCreationTime && pumpCreationTime < meteoraCreationTime) {
+          isPumpPoolOlder = true;
+          const pumpAge = new Date(pumpCreationTime).toLocaleString();
+          const meteoraAge = new Date(meteoraCreationTime).toLocaleString();
+          console.log(`✅ ${symbol} graduated from pump platform! PumpPool: ${pumpAge} → Meteora: ${meteoraAge}`);
+        } else {
+          console.log(`🚫 ${symbol} was NOT created on pump platforms before Meteora - skipping`);
+          await markTokenAsProcessed(tokenAddress, {
+            reason: 'pump_pools_not_older',
+            symbol,
+            hasPumpFun: pumpPools.hasPumpFun,
+            hasPumpSwap: pumpPools.hasPumpSwap,
+            pumpCreationTime: pumpCreationTime ? new Date(pumpCreationTime).toISOString() : null,
+            meteoraCreationTime: meteoraCreationTime ? new Date(meteoraCreationTime).toISOString() : null,
+            age: ageString
+          });
+          continue;
+        }
+        
+        console.log(`✅ ${symbol} is a valid pump platform graduate - including in signals`);
         
         // Add calculated age to pair data
         const enhancedPair = {
@@ -702,7 +748,7 @@ async function sendMeteoraSignal(tokenData, meteoraPair, safetyScore = null) {
 
     const safetyInfo = safetyScore ? `🛡️ **Safety Score:** ${safetyScore}/1000 ✅\n` : '';
 
-    const message = `🚀 **METEORA POOL SIGNAL** 🚀\n\n` +
+    const message = `🚀 **PUMP PLATFORM GRADUATE** 🚀\n\n` +
       `📊 **Token:** ${name} (${symbol})\n` +
       `💰 **Price:** $${price}\n` +
       `📈 **Market Cap:** $${marketCap.toLocaleString()}\n` +
@@ -715,10 +761,11 @@ async function sendMeteoraSignal(tokenData, meteoraPair, safetyScore = null) {
       `📱 **Pair:** ${meteoraPair.baseToken?.symbol}/${meteoraPair.quoteToken?.symbol}\n\n` +
       `📊 **DexScreener:** https://dexscreener.com/solana/${tokenAddress}\n` +
       `🌐 **Meteora:** https://app.meteora.ag/pools/${meteoraPair.pairAddress}\n\n` +
-      `⚡ **Signal:** NEW METEORA POOL DETECTED!\n` +
-      `🎯 **Strategy:** Monitor for entry opportunities\n` +
+      `⚡ **Signal:** TOKEN GRADUATED FROM PUMP PLATFORM TO METEORA!\n` +
+      `🎓 **Status:** Successfully migrated from PumpFun/PumpSwap\n` +
+      `🎯 **Strategy:** Strong candidate - already proven on pump platforms\n` +
       `🛡️ **Safety:** Verified by RugCheck\n\n` +
-      `#Meteora #Solana #DeFi #${symbol} #SafeToken`;
+      `#Meteora #PumpGraduate #Solana #DeFi #${symbol} #SafeToken`;
 
     // Send to channel without inline keyboard (signal only) with timeout
     try {
@@ -732,7 +779,7 @@ async function sendMeteoraSignal(tokenData, meteoraPair, safetyScore = null) {
       );
       
       await Promise.race([messagePromise, timeoutPromise]);
-      console.log(`✅ Sent Meteora signal for ${symbol} to ${CHANNEL_USERNAME}`);
+      console.log(`✅ Sent pump platform graduate signal for ${symbol} to ${CHANNEL_USERNAME}`);
     } catch (messageError) {
       console.error(`❌ Failed to send signal for ${symbol}:`, messageError.message);
       if (messageError.message.includes('timeout')) {
@@ -862,7 +909,7 @@ async function sendMeteoraSignal(tokenData, meteoraPair, safetyScore = null) {
 // MAIN MONITORING LOOP
 // ==============================
 async function monitorMeteoraPairs() {
-  console.log('🔍 Starting Meteora pairs API monitoring for signals...');
+  console.log('🔍 Starting pump platform graduate monitoring for signals...');
   let cycleCount = 0;
   let errorCount = 0;
   let lastErrorType = null;
@@ -877,11 +924,11 @@ async function monitorMeteoraPairs() {
       const meteoraPairs = await fetchMeteoraPairs();
       
       if (meteoraPairs.length === 0) {
-        console.log('⏳ No new Meteora pairs to process');
+        console.log('⏳ No new pump platform graduates to process');
         errorCount++; // Increment error count for empty results
       } else {
         errorCount = 0; // Reset error count on success
-        console.log(`📝 Processing ${meteoraPairs.length} new Meteora pairs...`);
+        console.log(`📝 Processing ${meteoraPairs.length} potential pump platform graduates...`);
         
         for (let i = 0; i < meteoraPairs.length; i++) {
           const token = meteoraPairs[i];
@@ -1029,11 +1076,11 @@ async function monitorMeteoraPairs() {
 // STARTUP
 // ==============================
 async function main() {
-  console.log('🤖 Starting Meteora Pairs Signal Bot...');
+  console.log('🤖 Starting Pump Platform Graduate Signal Bot...');
   console.log(`📢 Sending signals to: ${CHANNEL_USERNAME}`);
   console.log(`🔍 Source: DexScreener Search API (meteora)`);
   console.log(`⏰ Age Filter: Only tokens ≤ 6 hours old`);
-  console.log(`🚫 PumpFun/PumpSwap Filter: Exclude tokens on these DEXs`);
+  console.log(`🎓 PumpFun/PumpSwap Filter: ONLY tokens that graduated from these DEXs to Meteora`);
   console.log(`💧 Min Liquidity Filter: $${config.minLiquidity.toLocaleString()}`);
   console.log(`📈 24h Price Change Filter: ${config.requirePositivePriceChange ? 'Positive only' : 'Disabled'}`);
   console.log(`⏱️  Anti-freeze Protection: Enabled (10s timeouts)`);
@@ -1055,7 +1102,7 @@ async function main() {
   console.log('🔍 Testing channel connection...');
   try {
     // Add timeout to prevent hanging
-    const messagePromise = bot.sendMessage(CHANNEL_USERNAME, '🤖 **Meteora Pairs Signal Bot Started!**\n\nMonitoring DexScreener API for new Meteora pairs (≤6h old, no PumpFun/PumpSwap)...\n\n#BotStarted #Meteora #Signals', {
+    const messagePromise = bot.sendMessage(CHANNEL_USERNAME, '🤖 **Pump Platform Graduate Bot Started!**\n\nMonitoring DexScreener API for tokens that graduated from PumpFun/PumpSwap to Meteora (≤6h old)...\n\n#BotStarted #PumpGraduate #Meteora #Signals', {
       parse_mode: 'Markdown'
     });
     
