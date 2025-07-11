@@ -245,32 +245,51 @@ const state = {
 // ==============================
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Parse pair age string to minutes
+// Parse pair age string to minutes (handles formats like "2h 25m", "4m", "2h", "30s")
 function parseAgeToMinutes(ageString) {
   if (!ageString || typeof ageString !== 'string') return Infinity;
   
   const cleanAge = ageString.toLowerCase().trim();
-  const match = cleanAge.match(/^(\d+)([smhd])$/);
+  let totalMinutes = 0;
   
-  if (!match) return Infinity;
+  // Handle complex format like "2h 25m"
+  const hourMatch = cleanAge.match(/(\d+)h/);
+  const minuteMatch = cleanAge.match(/(\d+)m/);
+  const secondMatch = cleanAge.match(/(\d+)s/);
+  const dayMatch = cleanAge.match(/(\d+)d/);
   
-  const value = parseInt(match[1]);
-  const unit = match[2];
-  
-  switch (unit) {
-    case 's': return value / 60; // seconds to minutes
-    case 'm': return value; // already minutes
-    case 'h': return value * 60; // hours to minutes
-    case 'd': return value * 60 * 24; // days to minutes
-    default: return Infinity;
+  if (dayMatch) {
+    totalMinutes += parseInt(dayMatch[1]) * 60 * 24; // days to minutes
   }
+  
+  if (hourMatch) {
+    totalMinutes += parseInt(hourMatch[1]) * 60; // hours to minutes
+  }
+  
+  if (minuteMatch) {
+    totalMinutes += parseInt(minuteMatch[1]); // already minutes
+  }
+  
+  if (secondMatch) {
+    totalMinutes += parseInt(secondMatch[1]) / 60; // seconds to minutes
+  }
+  
+  // If no matches found, return infinity (invalid format)
+  if (totalMinutes === 0 && !cleanAge.includes('0')) {
+    return Infinity;
+  }
+  
+  return totalMinutes;
 }
 
 // Check if token is newer than 6 hours (360 minutes)
 function isTokenNewEnough(ageString) {
   const ageInMinutes = parseAgeToMinutes(ageString);
   const maxAgeMinutes = 6 * 60; // 6 hours
-  return ageInMinutes <= maxAgeMinutes;
+  const isNewEnough = ageInMinutes <= maxAgeMinutes;
+  
+  console.log(`⏰ Age check: "${ageString}" = ${ageInMinutes.toFixed(1)} minutes (${isNewEnough ? 'PASS' : 'FAIL'})`);
+  return isNewEnough;
 }
 
 // Axios with timeout wrapper
@@ -336,6 +355,55 @@ async function checkMeteoraPool(tokenAddress) {
   } catch (error) {
     console.error(`❌ Error checking Meteora pool for ${tokenAddress}:`, error.message);
     return null;
+  }
+}
+
+// ==============================
+// PUMPFUN/PUMPSWAP POOL CHECK
+// ==============================
+async function checkPumpPools(tokenAddress) {
+  try {
+    console.log(`🔍 Checking PumpFun/PumpSwap pools for ${tokenAddress}...`);
+    
+    const response = await axiosWithTimeout({
+      method: 'get',
+      url: `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`
+    }, 10000);
+    
+    if (!response.data || !response.data.pairs) {
+      console.log(`❌ No pairs data found for ${tokenAddress}`);
+      return { hasPumpFun: false, hasPumpSwap: false, pairs: [] };
+    }
+    
+    const pairs = response.data.pairs;
+    const pumpFunPairs = pairs.filter(pair => 
+      pair.dexId === 'pumpfun' || 
+      pair.dexId === 'pump.fun' ||
+      pair.url?.includes('pump.fun')
+    );
+    
+    const pumpSwapPairs = pairs.filter(pair => 
+      pair.dexId === 'pumpswap' || 
+      pair.dexId === 'pump.swap' ||
+      pair.url?.includes('pumpswap')
+    );
+    
+    const hasPumpFun = pumpFunPairs.length > 0;
+    const hasPumpSwap = pumpSwapPairs.length > 0;
+    
+    console.log(`✅ PumpFun pools: ${pumpFunPairs.length}, PumpSwap pools: ${pumpSwapPairs.length}`);
+    
+    return {
+      hasPumpFun,
+      hasPumpSwap,
+      pumpFunPairs,
+      pumpSwapPairs,
+      allPairs: pairs
+    };
+    
+  } catch (error) {
+    console.error(`❌ Error checking pump pools for ${tokenAddress}:`, error.message);
+    return { hasPumpFun: false, hasPumpSwap: false, pairs: [] };
   }
 }
 
@@ -467,16 +535,20 @@ async function fetchMeteoraPairs() {
     // Parse the HTML table containing Meteora pairs
     let pairsData = [];
     
-    console.log('🔍 Method 2a: Parsing HTML table rows...');
+        console.log('🔍 Method 2a: Parsing HTML table rows...');
     const tableRows = $('.ds-dex-table-row');
     console.log(`📊 Found ${tableRows.length} table rows`);
     
-    tableRows.each((i, elem) => {
+    // Convert to array and process with async/await
+    const tableRowsArray = tableRows.toArray();
+    
+    for (let i = 0; i < tableRowsArray.length; i++) {
       try {
+        const elem = tableRowsArray[i];
         const $row = $(elem);
         const href = $row.attr('href');
         
-        if (!href) return;
+        if (!href) continue;
         
         // Extract pair address from href (e.g., "/solana/ba5rfso67fnkb4cnwjsggpjpuq8xhxs4kuswbrzdvcw2")
         const pairAddress = href.replace('/solana/', '');
@@ -485,6 +557,21 @@ async function fetchMeteoraPairs() {
         const baseTokenSymbol = $row.find('.ds-dex-table-row-base-token-symbol').text().trim();
         const quoteTokenSymbol = $row.find('.ds-dex-table-row-quote-token-symbol').text().trim();
         const baseTokenName = $row.find('.ds-dex-table-row-base-token-name-text').text().trim();
+        
+        // Extract base token address from image src if available
+        let baseTokenAddress = pairAddress; // fallback to pair address
+        const tokenImg = $row.find('.ds-dex-table-row-token-icon-img');
+        if (tokenImg.length > 0) {
+          const imgSrc = tokenImg.attr('src');
+          if (imgSrc) {
+            // Extract token address from image URL like: 
+            // https://dd.dexscreener.com/ds-data/tokens/solana/4TBi66vi32S7J8X1A6eWfaLHYmUXu7CStcEmsJQdpump.png
+            const tokenMatch = imgSrc.match(/tokens\/solana\/([A-Za-z0-9]+)\.png/);
+            if (tokenMatch && tokenMatch[1]) {
+              baseTokenAddress = tokenMatch[1];
+            }
+          }
+        }
         
         // Extract price (handle the special formatting)
         let priceText = $row.find('.ds-dex-table-row-col-price .chakra-text').first().text().trim();
@@ -512,59 +599,68 @@ async function fetchMeteoraPairs() {
         // Check if this is a Meteora pair (look for DYN badge or other indicators)
         const isDynamic = $row.find('.ds-dex-table-row-badge-label').text().includes('DYN');
         
-                 if (baseTokenSymbol && pairAddress) {
-           // Check if token is new enough (6 hours or less)
-           if (!isTokenNewEnough(pairAge)) {
-             console.log(`⏰ Skipping ${baseTokenSymbol} - too old (${pairAge})`);
-             return; // Skip this row
-           }
-           
-           // Create a pair object similar to DexScreener API format
-           const pairData = {
-             chainId: 'solana',
-             dexId: 'meteora',
-             url: `https://dexscreener.com${href}`,
-             pairAddress: pairAddress,
-             baseToken: {
-               address: pairAddress, // We'll need to extract actual token address later
-               name: baseTokenName || baseTokenSymbol,
-               symbol: baseTokenSymbol
-             },
-             quoteToken: {
-               symbol: quoteTokenSymbol
-             },
-             priceUsd: price.toString(),
-             pairAge: pairAge,
-             txns: {
-               h24: {
-                 buys: buys,
-                 sells: sells
-               }
-             },
-             volume: {
-               h24: parseFloat(volume.replace(/[$,]/g, '')) || 0
-             },
-             priceChange: {
-               m5: parseFloat(priceChange5m.replace('%', '')) || 0,
-               h1: parseFloat(priceChange1h.replace('%', '')) || 0,
-               h6: parseFloat(priceChange6h.replace('%', '')) || 0,
-               h24: parseFloat(priceChange24h.replace('%', '')) || 0
-             },
-             liquidity: {
-               usd: parseFloat(liquidity.replace(/[$,<]/g, '')) || 0
-             },
-             marketCap: parseFloat(marketCap.replace(/[$,]/g, '')) || 0,
-             isDynamic: isDynamic,
-             labels: isDynamic ? ['meteora'] : []
-           };
-           
-           console.log(`✅ Including ${baseTokenSymbol} - age: ${pairAge}`);
-           pairsData.push(pairData);
-         }
+        if (baseTokenSymbol && baseTokenAddress) {
+          // Check if token is new enough (6 hours or less)
+          if (!isTokenNewEnough(pairAge)) {
+            console.log(`⏰ Skipping ${baseTokenSymbol} - too old (${pairAge})`);
+            continue; // Skip this row
+          }
+          
+          console.log(`📊 Found token: ${baseTokenSymbol} (${baseTokenAddress}) - age: ${pairAge}`);
+          
+          // Check for PumpFun/PumpSwap pools
+          const pumpPools = await checkPumpPools(baseTokenAddress);
+          
+          // Create a pair object similar to DexScreener API format
+          const pairData = {
+            chainId: 'solana',
+            dexId: 'meteora',
+            url: `https://dexscreener.com${href}`,
+            pairAddress: pairAddress,
+            baseToken: {
+              address: baseTokenAddress,
+              name: baseTokenName || baseTokenSymbol,
+              symbol: baseTokenSymbol
+            },
+            quoteToken: {
+              symbol: quoteTokenSymbol
+            },
+            priceUsd: price.toString(),
+            pairAge: pairAge,
+            txns: {
+              h24: {
+                buys: buys,
+                sells: sells
+              }
+            },
+            volume: {
+              h24: parseFloat(volume.replace(/[$,]/g, '')) || 0
+            },
+            priceChange: {
+              m5: parseFloat(priceChange5m.replace('%', '')) || 0,
+              h1: parseFloat(priceChange1h.replace('%', '')) || 0,
+              h6: parseFloat(priceChange6h.replace('%', '')) || 0,
+              h24: parseFloat(priceChange24h.replace('%', '')) || 0
+            },
+            liquidity: {
+              usd: parseFloat(liquidity.replace(/[$,<]/g, '')) || 0
+            },
+            marketCap: parseFloat(marketCap.replace(/[$,]/g, '')) || 0,
+            isDynamic: isDynamic,
+            labels: isDynamic ? ['meteora'] : [],
+            // Add pump pool information
+            hasPumpFun: pumpPools.hasPumpFun,
+            hasPumpSwap: pumpPools.hasPumpSwap,
+            pumpPools: pumpPools
+          };
+          
+          console.log(`✅ Including ${baseTokenSymbol} - age: ${pairAge}, PumpFun: ${pumpPools.hasPumpFun}, PumpSwap: ${pumpPools.hasPumpSwap}`);
+          pairsData.push(pairData);
+        }
       } catch (parseError) {
         console.log(`❌ Failed to parse table row ${i + 1}:`, parseError.message);
       }
-    });
+    }
     
     console.log(`✅ Parsed ${pairsData.length} pairs from HTML table`);
     
