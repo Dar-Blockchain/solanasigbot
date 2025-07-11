@@ -111,22 +111,16 @@ const config = {
 // REDIS CONFIGURATION
 // ==============================
 const redisClient = redis.createClient({
-  host: 'localhost',
-  port: 6379,
-  retry_strategy: (options) => {
-    if (options.error && options.error.code === 'ECONNREFUSED') {
-      console.error('❌ Redis server connection refused');
-      return new Error('Redis server connection refused');
+  socket: {
+    host: 'localhost',
+    port: 6379,
+    reconnectStrategy: (retries) => {
+      if (retries > 10) {
+        console.error('❌ Redis max retry attempts reached');
+        return new Error('Max retry attempts reached');
+      }
+      return Math.min(retries * 100, 3000);
     }
-    if (options.total_retry_time > 1000 * 60 * 60) {
-      console.error('❌ Redis retry time exhausted');
-      return new Error('Retry time exhausted');
-    }
-    if (options.attempt > 10) {
-      console.error('❌ Redis max retry attempts reached');
-      return undefined;
-    }
-    return Math.min(options.attempt * 100, 3000);
   }
 });
 
@@ -161,8 +155,8 @@ async function isTokenProcessed(tokenAddress) {
       console.log('⚠️  Redis not ready, treating as unprocessed token');
       return false;
     }
-    const result = await redisClient.sismember(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
-    return result === 1;
+    const result = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
+    return result === true;
   } catch (error) {
     console.error('❌ Redis error checking token:', error.message);
     return false; // Fallback to processing if Redis fails
@@ -177,7 +171,7 @@ async function markTokenAsProcessed(tokenAddress, metadata = {}) {
     }
     
     // Add to processed tokens set
-    await redisClient.sadd(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
+    await redisClient.sAdd(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
     
     // Store metadata with timestamp
     const tokenData = {
@@ -186,9 +180,9 @@ async function markTokenAsProcessed(tokenAddress, metadata = {}) {
       ...metadata
     };
     
-    await redisClient.hset(
+    await redisClient.hSet(
       `${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`,
-      Object.entries(tokenData).flat()
+      tokenData
     );
     
     // Set expiration for metadata (30 days)
@@ -203,7 +197,10 @@ async function markTokenAsProcessed(tokenAddress, metadata = {}) {
 
 async function getProcessedTokensCount() {
   try {
-    return await redisClient.scard(REDIS_KEYS.PROCESSED_TOKENS);
+    if (!redisClient.isReady) {
+      return 0;
+    }
+    return await redisClient.sCard(REDIS_KEYS.PROCESSED_TOKENS);
   } catch (error) {
     console.error('❌ Redis error getting count:', error.message);
     return 0;
