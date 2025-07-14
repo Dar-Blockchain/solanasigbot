@@ -563,10 +563,10 @@ async function monitorMeteoraPools() {
             console.log(`\n[${i + 1}/${meteoraPools.length}] Processing: ${symbol} (${baseTokenAddress})`);
             console.log(`⏰ Age: ${ageData.ageString}`);
             
-            // Check if already processed
+            // Check if already processed in Redis (prevents duplicate signals)
             const isProcessed = await isTokenProcessed(baseTokenAddress);
             if (isProcessed) {
-              console.log('⏭️  Already processed, skipping...');
+              console.log(`⏭️  ${symbol} (${baseTokenAddress}) already processed in Redis - skipping to prevent duplicate signal`);
               continue;
             }
             
@@ -619,17 +619,42 @@ async function monitorMeteoraPools() {
             const { isSafe, score } = await checkTokenSafety(baseTokenAddress);
             
             if (isSafe) {
+              // Double-check Redis before sending signal to prevent any race conditions
+              const isAlreadyProcessed = await isTokenProcessed(baseTokenAddress);
+              if (isAlreadyProcessed) {
+                console.log(`⚠️  ${symbol} was already processed by another process - skipping signal`);
+                continue;
+              }
+              
               console.log(`✅ ${symbol} passed safety check - sending signal!`);
-              await sendPumpGraduateSignal(poolData, pumpPools, score);
-              graduatesFound++;
+              
+              // Mark as processed BEFORE sending signal to prevent duplicates
               await markTokenAsProcessed(baseTokenAddress, {
-                reason: 'signal_sent',
+                reason: 'signal_being_sent',
                 symbol,
                 safetyScore: score,
                 hasPumpFun: pumpPools.hasPumpFun,
                 hasPumpSwap: pumpPools.hasPumpSwap,
-                hasMeteoraPool: true
+                hasMeteoraPool: true,
+                timestamp: new Date().toISOString()
               });
+              
+              // Send the signal
+              await sendPumpGraduateSignal(poolData, pumpPools, score);
+              graduatesFound++;
+              
+              // Update Redis with successful signal sent
+              await markTokenAsProcessed(baseTokenAddress, {
+                reason: 'signal_sent_successfully',
+                symbol,
+                safetyScore: score,
+                hasPumpFun: pumpPools.hasPumpFun,
+                hasPumpSwap: pumpPools.hasPumpSwap,
+                hasMeteoraPool: true,
+                signalSentAt: new Date().toISOString()
+              });
+              
+              console.log(`🎯 ${symbol} signal sent and marked as processed in Redis`);
             } else {
               console.log(`❌ ${symbol} failed safety check - skipping signal`);
               await markTokenAsProcessed(baseTokenAddress, {
@@ -694,12 +719,13 @@ async function monitorMeteoraPools() {
 async function main() {
   console.log('🤖 Starting Pump Platform Graduate Signal Bot (GeckoTerminal API)...');
   console.log(`📢 Sending signals to: ${CHANNEL_USERNAME}`);
-  console.log(`📡 Source: GeckoTerminal API (100 pages)`);
+  console.log(`📡 Source: GeckoTerminal API (${MAX_PAGES} pages)`);
   console.log(`🌊 Primary Filter: Meteora pools only`);
   console.log(`🎓 Graduate Filter: Must exist on PumpFun/PumpSwap + Meteora`);
   console.log(`⏰ Age Filter: Only tokens ≤ 6 hours old`);
   console.log(`📈 Price Filter: ${config.requirePositivePriceChange ? 'Positive 24h change only' : 'Disabled'}`);
-  console.log(`🗄️  Storage: Redis (localhost:6379)`);
+  console.log(`🗄️  Storage: Redis (localhost:6379) - Prevents duplicate signals`);
+  console.log(`🚫 Deduplication: Each token signaled only once`);
   console.log(`⏱️  Cycle Interval: ${CYCLE_DELAY/1000} seconds`);
   
   // Connect to Redis
@@ -718,14 +744,15 @@ async function main() {
   try {
     const messagePromise = bot.sendMessage(CHANNEL_USERNAME, 
       '🤖 **Pump Graduate Bot Started (GeckoTerminal)!**\n\n' +
-      '📊 **API Source:** GeckoTerminal (100 pages)\n' +
+      '📊 **API Source:** GeckoTerminal (10 pages)\n' +
       '🌊 **Primary Filter:** Meteora pools\n' +
       '🎓 **Graduate Check:** PumpFun/PumpSwap verification\n' +
       '⏰ **Age Filter:** ≤6 hours old\n' +
       '📈 **Price Filter:** Positive 24h change\n' +
       '🛡️ **Safety:** RugCheck verification\n' +
-      '🗄️ **Storage:** Redis deduplication\n\n' +
-      '#BotStarted #PumpGraduate #GeckoTerminal #Meteora #100Pages',
+      '🗄️ **Deduplication:** Redis prevents duplicate signals\n' +
+      '🚫 **No Repeats:** Each token signaled only once\n\n' +
+      '#BotStarted #PumpGraduate #GeckoTerminal #Meteora #NoDuplicates',
       { parse_mode: 'Markdown' }
     );
     
