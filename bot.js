@@ -94,70 +94,70 @@ redisClient.on('end', () => {
 // REDIS HELPER FUNCTIONS
 // ==============================
 const REDIS_KEYS = {
-  PROCESSED_POOLS: 'meteora:processed_pools',
-  POOL_METADATA: 'meteora:pool_metadata'
+  PROCESSED_TOKENS: 'meteora:processed_tokens',
+  TOKEN_METADATA: 'meteora:token_metadata'
 };
 
-async function isPoolProcessed(poolAddress) {
+async function isTokenProcessed(tokenAddress) {
   try {
     if (!redisClient.isReady) {
-      console.log('⚠️  Redis not ready, treating as unprocessed pool');
+      console.log('⚠️  Redis not ready, treating as unprocessed token');
       return false;
     }
-    const result = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_POOLS, poolAddress);
+    const result = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
     return result === true;
   } catch (error) {
-    console.error('❌ Redis error checking pool:', error.message);
+    console.error('❌ Redis error checking token:', error.message);
     return false; // Fallback to processing if Redis fails
   }
 }
 
-async function markPoolAsProcessed(poolAddress, metadata = {}) {
+async function markTokenAsProcessed(tokenAddress, metadata = {}) {
   try {
     if (!redisClient.isReady) {
-      console.log('⚠️  Redis not ready, skipping pool marking');
+      console.log('⚠️  Redis not ready, skipping token marking');
       return false;
     }
     
-    // Add to processed pools set
-    await redisClient.sAdd(REDIS_KEYS.PROCESSED_POOLS, poolAddress);
+    // Add to processed tokens set
+    await redisClient.sAdd(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
     
     // Store metadata with timestamp
-    const poolData = {
-      poolAddress: poolAddress,
+    const tokenData = {
+      tokenAddress: tokenAddress,
       processedAt: new Date().toISOString(),
       ...metadata
     };
     
     // Convert all values to strings for Redis
     const stringifiedData = {};
-    for (const [key, value] of Object.entries(poolData)) {
+    for (const [key, value] of Object.entries(tokenData)) {
       if (value !== null && value !== undefined) {
         stringifiedData[key] = String(value);
       }
     }
     
     await redisClient.hSet(
-      `${REDIS_KEYS.POOL_METADATA}:${poolAddress}`,
+      `${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`,
       stringifiedData
     );
     
     // Set expiration for metadata (30 days)
-    await redisClient.expire(`${REDIS_KEYS.POOL_METADATA}:${poolAddress}`, 30 * 24 * 60 * 60);
+    await redisClient.expire(`${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`, 30 * 24 * 60 * 60);
     
     return true;
   } catch (error) {
-    console.error('❌ Redis error marking pool:', error.message);
+    console.error('❌ Redis error marking token:', error.message);
     return false;
   }
 }
 
-async function getProcessedPoolsCount() {
+async function getProcessedTokensCount() {
   try {
     if (!redisClient.isReady) {
       return 0;
     }
-    return await redisClient.sCard(REDIS_KEYS.PROCESSED_POOLS);
+    return await redisClient.sCard(REDIS_KEYS.PROCESSED_TOKENS);
   } catch (error) {
     console.error('❌ Redis error getting count:', error.message);
     return 0;
@@ -564,21 +564,21 @@ async function monitorMeteoraPools() {
             console.log(`📍 Pool: ${poolAddress}`);
             console.log(`⏰ Age: ${ageData.ageString}`);
             
-            // Check if pool already processed in Redis (prevents duplicate signals)
-            const isProcessed = await isPoolProcessed(poolAddress);
+            // Check if TOKEN already processed in Redis (prevents duplicate signals for same token)
+            const isProcessed = await isTokenProcessed(baseTokenAddress);
             if (isProcessed) {
-              console.log(`⏭️  Pool ${poolAddress} already processed in Redis - skipping to prevent duplicate signal`);
+              console.log(`⏭️  Token ${baseTokenAddress} already processed in Redis - skipping to prevent duplicate signal`);
               continue;
             }
             
             // Filter: Check pool age (6 hours or newer)
             if (!isTokenNewEnough(ageData.ageInHours)) {
-              console.log(`⏰ Pool is too old (${ageData.ageString}) - skipping`);
-              await markPoolAsProcessed(poolAddress, {
+              console.log(`⏰ Token is too old (${ageData.ageString}) - skipping`);
+              await markTokenAsProcessed(baseTokenAddress, {
                 reason: 'too_old',
                 age: ageData.ageString,
                 symbol,
-                tokenAddress: baseTokenAddress
+                poolAddress: poolAddress
               });
               continue;
             }
@@ -586,11 +586,11 @@ async function monitorMeteoraPools() {
             // Filter: Check if has positive price change
             if (config.requirePositivePriceChange && pricing.priceChange24h <= 0) {
               console.log(`❌ Negative 24h price change (${pricing.priceChange24h.toFixed(2)}%) - skipping`);
-              await markPoolAsProcessed(poolAddress, {
+              await markTokenAsProcessed(baseTokenAddress, {
                 reason: 'negative_price_change',
                 priceChange24h: pricing.priceChange24h,
                 symbol,
-                tokenAddress: baseTokenAddress
+                poolAddress: poolAddress
               });
               continue;
             }
@@ -603,10 +603,10 @@ async function monitorMeteoraPools() {
             // Filter: Only include tokens that ARE on PumpFun/PumpSwap
             if (!pumpPools.hasPumpFun && !pumpPools.hasPumpSwap) {
               console.log(`🚫 ${symbol} is NOT on PumpFun/PumpSwap - skipping`);
-              await markPoolAsProcessed(poolAddress, {
+              await markTokenAsProcessed(baseTokenAddress, {
                 reason: 'not_on_pump_platforms',
                 symbol,
-                tokenAddress: baseTokenAddress,
+                poolAddress: poolAddress,
                 hasPumpFun: false,
                 hasPumpSwap: false,
                 age: ageData.ageString
@@ -624,19 +624,19 @@ async function monitorMeteoraPools() {
             
             if (isSafe) {
               // Double-check Redis before sending signal to prevent any race conditions
-              const isAlreadyProcessed = await isPoolProcessed(poolAddress);
+              const isAlreadyProcessed = await isTokenProcessed(baseTokenAddress);
               if (isAlreadyProcessed) {
-                console.log(`⚠️  Pool ${poolAddress} was already processed by another process - skipping signal`);
+                console.log(`⚠️  Token ${baseTokenAddress} was already processed by another process - skipping signal`);
                 continue;
               }
               
               console.log(`✅ ${symbol} passed safety check - sending signal!`);
               
-              // Mark pool as processed BEFORE sending signal to prevent duplicates
-              await markPoolAsProcessed(poolAddress, {
+              // Mark TOKEN as processed BEFORE sending signal to prevent duplicates
+              await markTokenAsProcessed(baseTokenAddress, {
                 reason: 'signal_being_sent',
                 symbol,
-                tokenAddress: baseTokenAddress,
+                poolAddress: poolAddress,
                 safetyScore: score,
                 hasPumpFun: pumpPools.hasPumpFun,
                 hasPumpSwap: pumpPools.hasPumpSwap,
@@ -649,10 +649,10 @@ async function monitorMeteoraPools() {
               graduatesFound++;
               
               // Update Redis with successful signal sent
-              await markPoolAsProcessed(poolAddress, {
+              await markTokenAsProcessed(baseTokenAddress, {
                 reason: 'signal_sent_successfully',
                 symbol,
-                tokenAddress: baseTokenAddress,
+                poolAddress: poolAddress,
                 safetyScore: score,
                 hasPumpFun: pumpPools.hasPumpFun,
                 hasPumpSwap: pumpPools.hasPumpSwap,
@@ -660,13 +660,13 @@ async function monitorMeteoraPools() {
                 signalSentAt: new Date().toISOString()
               });
               
-              console.log(`🎯 Pool ${poolAddress} signal sent and marked as processed in Redis`);
+              console.log(`🎯 Token ${baseTokenAddress} signal sent and marked as processed in Redis`);
             } else {
               console.log(`❌ ${symbol} failed safety check - skipping signal`);
-              await markPoolAsProcessed(poolAddress, {
+              await markTokenAsProcessed(baseTokenAddress, {
                 reason: 'failed_safety_check',
                 symbol,
-                tokenAddress: baseTokenAddress,
+                poolAddress: poolAddress,
                 safetyScore: score
               });
             }
@@ -686,9 +686,9 @@ async function monitorMeteoraPools() {
       const cycleTime = ((Date.now() - cycleStartTime) / 1000).toFixed(1);
       console.log(`✅ Completed monitoring cycle #${cycleCount} in ${cycleTime}s`);
       
-      // Get processed pools count from Redis
-      const processedCount = await getProcessedPoolsCount();
-      console.log(`💾 Total processed pools in Redis: ${processedCount}`);
+      // Get processed tokens count from Redis
+      const processedCount = await getProcessedTokensCount();
+      console.log(`💾 Total processed tokens in Redis: ${processedCount}`);
       
       // Dynamic wait time based on error count
       let waitTime = CYCLE_DELAY; // Default 60 seconds
@@ -732,17 +732,17 @@ async function main() {
   console.log(`⏰ Age Filter: Only tokens ≤ 6 hours old`);
   console.log(`📈 Price Filter: ${config.requirePositivePriceChange ? 'Positive 24h change only' : 'Disabled'}`);
   console.log(`🗄️  Storage: Redis (localhost:6379) - Prevents duplicate signals`);
-  console.log(`🚫 Deduplication: Each pool signaled only once`);
+  console.log(`🚫 Deduplication: Each token signaled only once`);
   console.log(`⏱️  Cycle Interval: ${CYCLE_DELAY/1000} seconds`);
   
   // Connect to Redis
   try {
     await redisClient.connect();
-    const processedCount = await getProcessedPoolsCount();
-    console.log(`💾 Found ${processedCount} previously processed pools in Redis`);
+    const processedCount = await getProcessedTokensCount();
+    console.log(`💾 Found ${processedCount} previously processed tokens in Redis`);
   } catch (redisError) {
     console.error('❌ Failed to connect to Redis:', redisError.message);
-    console.log('⚠️  Bot will continue but processed pools won\'t persist across restarts');
+    console.log('⚠️  Bot will continue but processed tokens won\'t persist across restarts');
     console.log('🔧 Make sure Redis server is running on localhost:6379');
   }
   
@@ -758,7 +758,7 @@ async function main() {
       '📈 **Price Filter:** Positive 24h change\n' +
       '🛡️ **Safety:** RugCheck verification\n' +
       '🗄️ **Deduplication:** Redis prevents duplicate signals\n' +
-      '🚫 **No Repeats:** Each pool signaled only once\n\n' +
+      '🚫 **No Repeats:** Each token signaled only once\n\n' +
       '#BotStarted #PumpGraduate #GeckoTerminal #Meteora #NoDuplicates',
       { parse_mode: 'Markdown' }
     );
