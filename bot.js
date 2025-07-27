@@ -54,6 +54,7 @@ const CYCLE_DELAY = 60000; // 60 seconds between monitoring cycles
 const config = {
   minLiquidity: parseInt(process.env.MIN_LIQUIDITY) || 10000,
   requirePositivePriceChange: true, // Only process tokens with positive 24h price change
+  maxMarketCap: 15000000, // Maximum market cap: $15M USD
 };
 
 // ==============================
@@ -94,31 +95,31 @@ redisClient.on('end', () => {
 // REDIS HELPER FUNCTIONS
 // ==============================
 const REDIS_KEYS = {
-  PROCESSED_POOLS: 'meteora:processed_pools',
-  POOL_METADATA: 'meteora:pool_metadata',
-  SIGNAL_LOCKS: 'meteora:signal_locks' // New key for signal locks
+  PROCESSED_TOKENS: 'meteora:processed_tokens', // Changed from pools to tokens
+  TOKEN_METADATA: 'meteora:token_metadata',     // Changed from pools to tokens
+  SIGNAL_LOCKS: 'meteora:signal_locks'         // Signal locks for tokens
 };
 
-async function isPoolProcessed(poolAddress) {
+async function isTokenProcessed(tokenAddress) {
   try {
     if (!redisClient.isReady) {
-      console.log('⚠️  Redis not ready, treating as unprocessed pool');
+      console.log('⚠️  Redis not ready, treating as unprocessed token');
       return false;
     }
     
     // Use async/await instead of callbacks for better reliability
-    const result = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_POOLS, poolAddress);
-    console.log(`🔍 Redis check for ${poolAddress}: ${result} (${result === true ? 'EXISTS' : 'NOT FOUND'})`);
+    const result = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
+    console.log(`🔍 Redis check for token ${tokenAddress}: ${result} (${result === true ? 'EXISTS' : 'NOT FOUND'})`);
     return result === true;
     
   } catch (error) {
-    console.error('❌ Redis error checking pool:', error.message);
+    console.error('❌ Redis error checking token:', error.message);
     return false; // Fallback to processing if Redis fails
   }
 }
 
-// Atomic operation to check and mark pool in one step to prevent race conditions
-async function checkAndMarkPoolAsProcessed(poolAddress, metadata = {}) {
+// Atomic operation to check and mark token in one step to prevent race conditions
+async function checkAndMarkTokenAsProcessed(tokenAddress, metadata = {}) {
   try {
     if (!redisClient.isReady) {
       console.log('⚠️  Redis not ready, treating as unprocessed');
@@ -126,7 +127,7 @@ async function checkAndMarkPoolAsProcessed(poolAddress, metadata = {}) {
     }
     
     // Use SETNX (set if not exists) for atomic check-and-set operation
-    const lockKey = `${REDIS_KEYS.SIGNAL_LOCKS}:${poolAddress}`;
+    const lockKey = `${REDIS_KEYS.SIGNAL_LOCKS}:${tokenAddress}`;
     const lockValue = `${Date.now()}-${Math.random()}`;
     
     // Try to acquire lock with expiration (10 minutes max)
@@ -136,25 +137,25 @@ async function checkAndMarkPoolAsProcessed(poolAddress, metadata = {}) {
     });
     
     if (!lockAcquired) {
-      console.log(`🔒 Pool ${poolAddress} is locked by another process - skipping`);
+      console.log(`🔒 Token ${tokenAddress} is locked by another process - skipping`);
       return true; // Return true = already being processed (skip)
     }
     
-    // Check if pool was already processed (double-check after acquiring lock)
-    const alreadyProcessed = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_POOLS, poolAddress);
+    // Check if token was already processed (double-check after acquiring lock)
+    const alreadyProcessed = await redisClient.sIsMember(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
     if (alreadyProcessed) {
-      console.log(`✅ Pool ${poolAddress} already in processed set - releasing lock`);
+      console.log(`✅ Token ${tokenAddress} already in processed set - releasing lock`);
       await redisClient.del(lockKey); // Release lock
       return true; // Return true = already processed (skip)
     }
     
-    // Pool is not processed and we have the lock - mark it as processed immediately
-    await redisClient.sAdd(REDIS_KEYS.PROCESSED_POOLS, poolAddress);
-    console.log(`✅ Atomically marked pool ${poolAddress} as processed`);
+    // Token is not processed and we have the lock - mark it as processed immediately
+    await redisClient.sAdd(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
+    console.log(`✅ Atomically marked token ${tokenAddress} as processed`);
     
     // Store metadata with timestamp
-    const poolData = {
-      poolAddress: poolAddress,
+    const tokenData = {
+      tokenAddress: tokenAddress,
       processedAt: new Date().toISOString(),
       lockAcquiredAt: new Date().toISOString(),
       lockValue: lockValue,
@@ -163,7 +164,7 @@ async function checkAndMarkPoolAsProcessed(poolAddress, metadata = {}) {
     
     // Convert all values to strings for Redis
     const stringifiedData = {};
-    for (const [key, value] of Object.entries(poolData)) {
+    for (const [key, value] of Object.entries(tokenData)) {
       if (value !== null && value !== undefined) {
         stringifiedData[key] = String(value);
       }
@@ -171,17 +172,17 @@ async function checkAndMarkPoolAsProcessed(poolAddress, metadata = {}) {
     
     // Store metadata
     await redisClient.hSet(
-      `${REDIS_KEYS.POOL_METADATA}:${poolAddress}`,
+      `${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`,
       stringifiedData
     );
     
     // Set expiration for metadata (30 days)
-    await redisClient.expire(`${REDIS_KEYS.POOL_METADATA}:${poolAddress}`, 30 * 24 * 60 * 60);
+    await redisClient.expire(`${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`, 30 * 24 * 60 * 60);
     
-    console.log(`✅ Stored metadata for ${poolAddress}`);
+    console.log(`✅ Stored metadata for token ${tokenAddress}`);
     
     // Keep the lock until signal is sent (don't release it here)
-    // We'll release it in releasePoolLock()
+    // We'll release it in releaseTokenLock()
     
     return false; // Return false = not processed before (safe to proceed with signal)
     
@@ -191,42 +192,42 @@ async function checkAndMarkPoolAsProcessed(poolAddress, metadata = {}) {
   }
 }
 
-async function releasePoolLock(poolAddress) {
+async function releaseTokenLock(tokenAddress) {
   try {
     if (!redisClient.isReady) {
       return;
     }
     
-    const lockKey = `${REDIS_KEYS.SIGNAL_LOCKS}:${poolAddress}`;
+    const lockKey = `${REDIS_KEYS.SIGNAL_LOCKS}:${tokenAddress}`;
     await redisClient.del(lockKey);
-    console.log(`🔓 Released lock for pool ${poolAddress}`);
+    console.log(`🔓 Released lock for token ${tokenAddress}`);
     
   } catch (error) {
     console.error('❌ Redis error releasing lock:', error.message);
   }
 }
 
-async function markPoolAsProcessed(poolAddress, metadata = {}) {
+async function markTokenAsProcessed(tokenAddress, metadata = {}) {
   try {
     if (!redisClient.isReady) {
-      console.log('⚠️  Redis not ready, skipping pool marking');
+      console.log('⚠️  Redis not ready, skipping token marking');
       return false;
     }
     
-    // Add to processed pools set
-    await redisClient.sAdd(REDIS_KEYS.PROCESSED_POOLS, poolAddress);
-    console.log(`✅ Added pool ${poolAddress} to Redis set`);
+    // Add to processed tokens set
+    await redisClient.sAdd(REDIS_KEYS.PROCESSED_TOKENS, tokenAddress);
+    console.log(`✅ Added token ${tokenAddress} to Redis set`);
     
     // Store metadata with timestamp
-    const poolData = {
-      poolAddress: poolAddress,
+    const tokenData = {
+      tokenAddress: tokenAddress,
       processedAt: new Date().toISOString(),
       ...metadata
     };
     
     // Convert all values to strings for Redis
     const stringifiedData = {};
-    for (const [key, value] of Object.entries(poolData)) {
+    for (const [key, value] of Object.entries(tokenData)) {
       if (value !== null && value !== undefined) {
         stringifiedData[key] = String(value);
       }
@@ -234,30 +235,30 @@ async function markPoolAsProcessed(poolAddress, metadata = {}) {
     
     // Store metadata
     await redisClient.hSet(
-      `${REDIS_KEYS.POOL_METADATA}:${poolAddress}`,
+      `${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`,
       stringifiedData
     );
     
     // Set expiration for metadata (30 days)
-    await redisClient.expire(`${REDIS_KEYS.POOL_METADATA}:${poolAddress}`, 30 * 24 * 60 * 60);
+    await redisClient.expire(`${REDIS_KEYS.TOKEN_METADATA}:${tokenAddress}`, 30 * 24 * 60 * 60);
     
-    console.log(`✅ Stored metadata for ${poolAddress}`);
+    console.log(`✅ Stored metadata for token ${tokenAddress}`);
     return true;
     
   } catch (error) {
-    console.error('❌ Redis error marking pool:', error.message);
+    console.error('❌ Redis error marking token:', error.message);
     return false;
   }
 }
 
-async function getProcessedPoolsCount() {
+async function getProcessedTokensCount() {
   try {
     if (!redisClient.isReady) {
       return 0;
     }
     
-    const count = await redisClient.sCard(REDIS_KEYS.PROCESSED_POOLS);
-    console.log(`📊 Redis pool count: ${count}`);
+    const count = await redisClient.sCard(REDIS_KEYS.PROCESSED_TOKENS);
+    console.log(`📊 Redis token count: ${count}`);
     return count || 0;
     
   } catch (error) {
@@ -380,7 +381,7 @@ async function fetchAllNewPools() {
       // Filter for Meteora pools on this page
       const meteoraPoolsOnPage = pools.filter(pool => {
         const dexId = pool.relationships?.dex?.data?.id;
-        return dexId === 'meteora';
+        return dexId === 'meteora' || dexId === 'meteora-damm-v2';
       });
       
       console.log(`🌊 Meteora pools on page ${page}: ${meteoraPoolsOnPage.length}`);
@@ -666,48 +667,56 @@ async function monitorMeteoraPools() {
             console.log(`📍 Pool: ${poolAddress}`);
             console.log(`⏰ Age: ${ageData.ageString}`);
             
-            // ATOMIC CHECK: Use atomic check-and-mark to prevent race conditions
-            const wasAlreadyProcessed = await checkAndMarkPoolAsProcessed(poolAddress, {
+            // ATOMIC CHECK: Use token address for deduplication to prevent duplicate signals for same token
+            const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(baseTokenAddress, {
               reason: 'initial_processing',
               symbol,
-              tokenAddress: baseTokenAddress,
+              poolAddress,
               age: ageData.ageString,
-              priceChange24h: pricing.priceChange24h
+              priceChange24h: pricing.priceChange24h,
+              marketCap: pricing.fdvUsd
             });
             
             if (wasAlreadyProcessed) {
-              console.log(`⏭️  Pool ${poolAddress} already processed/locked - skipping to prevent duplicate signal`);
+              console.log(`⏭️  Token ${baseTokenAddress} already processed/locked - skipping to prevent duplicate signal`);
               continue;
             }
             
-            console.log(`🔒 Acquired exclusive lock for pool ${poolAddress} - proceeding with filters...`);
+            console.log(`🔒 Acquired exclusive lock for token ${baseTokenAddress} (pool: ${poolAddress}) - proceeding with filters...`);
             
-            try {
-              // Filter: Check pool age (6 hours or newer)
-              if (!isTokenNewEnough(ageData.ageInHours)) {
-                console.log(`⏰ Token is too old (${ageData.ageString}) - releasing lock`);
-                await releasePoolLock(poolAddress);
-                continue;
-              }
+                          try {
+                // Filter: Check pool age (6 hours or newer)
+                if (!isTokenNewEnough(ageData.ageInHours)) {
+                  console.log(`⏰ Token is too old (${ageData.ageString}) - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                  continue;
+                }
+                
+                // Filter: Check if has positive price change
+                if (config.requirePositivePriceChange && pricing.priceChange24h <= 0) {
+                  console.log(`❌ Negative 24h price change (${pricing.priceChange24h.toFixed(2)}%) - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                  continue;
+                }
+                
+                // Filter: Check market cap (must be under $15M)
+                if (pricing.fdvUsd > config.maxMarketCap) {
+                  console.log(`💰 Market cap too high ($${pricing.fdvUsd.toLocaleString()} > $${config.maxMarketCap.toLocaleString()}) - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                  continue;
+                }
               
-              // Filter: Check if has positive price change
-              if (config.requirePositivePriceChange && pricing.priceChange24h <= 0) {
-                console.log(`❌ Negative 24h price change (${pricing.priceChange24h.toFixed(2)}%) - releasing lock`);
-                await releasePoolLock(poolAddress);
-                continue;
-              }
-              
-              console.log(`✅ ${symbol} passed age and price filters - checking pump platforms...`);
+                              console.log(`✅ ${symbol} passed age, price, and market cap filters - checking pump platforms...`);
               
               // Check for PumpFun/PumpSwap pools
               const pumpPools = await checkPumpPools(baseTokenAddress);
               
-              // Filter: Only include tokens that ARE on PumpFun/PumpSwap
-              if (!pumpPools.hasPumpFun && !pumpPools.hasPumpSwap) {
-                console.log(`🚫 ${symbol} is NOT on PumpFun/PumpSwap - releasing lock`);
-                await releasePoolLock(poolAddress);
-                continue;
-              }
+                              // Filter: Only include tokens that ARE on PumpFun/PumpSwap
+                if (!pumpPools.hasPumpFun && !pumpPools.hasPumpSwap) {
+                  console.log(`🚫 ${symbol} is NOT on PumpFun/PumpSwap - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                  continue;
+                }
               
               console.log(`🎓 ${symbol} is a pump platform graduate! Found on:`);
               if (pumpPools.hasPumpFun) console.log(`   ✅ PumpFun`);
@@ -717,28 +726,28 @@ async function monitorMeteoraPools() {
               // Check token safety before sending signal
               const { isSafe, score } = await checkTokenSafety(baseTokenAddress);
               
-              if (isSafe) {
-                console.log(`✅ ${symbol} passed safety check - sending signal!`);
+                              if (isSafe) {
+                  console.log(`✅ ${symbol} passed all filters including safety check - sending signal!`);
+                  
+                  // Send the signal (token is already marked as processed from checkAndMarkTokenAsProcessed)
+                  await sendPumpGraduateSignal(poolData, pumpPools, score);
+                  graduatesFound++;
+                  
+                  console.log(`🎯 Token ${baseTokenAddress} signal sent successfully!`);
+                  
+                  // Release the lock after successful signal
+                  await releaseTokenLock(baseTokenAddress);
+                  
+                } else {
+                  console.log(`❌ ${symbol} failed safety check - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                }
                 
-                // Send the signal (pool is already marked as processed from checkAndMarkPoolAsProcessed)
-                await sendPumpGraduateSignal(poolData, pumpPools, score);
-                graduatesFound++;
-                
-                console.log(`🎯 Pool ${poolAddress} signal sent successfully!`);
-                
-                // Release the lock after successful signal
-                await releasePoolLock(poolAddress);
-                
-              } else {
-                console.log(`❌ ${symbol} failed safety check - releasing lock`);
-                await releasePoolLock(poolAddress);
+              } catch (filterError) {
+                console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
+                // Always release lock on error
+                await releaseTokenLock(baseTokenAddress);
               }
-              
-            } catch (filterError) {
-              console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
-              // Always release lock on error
-              await releasePoolLock(poolAddress);
-            }
             
             // Rate limiting between tokens
             await sleep(2000);
@@ -755,9 +764,9 @@ async function monitorMeteoraPools() {
       const cycleTime = ((Date.now() - cycleStartTime) / 1000).toFixed(1);
       console.log(`✅ Completed monitoring cycle #${cycleCount} in ${cycleTime}s`);
       
-      // Get processed pools count from Redis
-      const processedCount = await getProcessedPoolsCount();
-      console.log(`💾 Total processed pools in Redis: ${processedCount}`);
+      // Get processed tokens count from Redis
+      const processedCount = await getProcessedTokensCount();
+      console.log(`💾 Total processed tokens in Redis: ${processedCount}`);
       
       // Dynamic wait time based on error count
       let waitTime = CYCLE_DELAY; // Default 60 seconds
@@ -796,19 +805,20 @@ async function main() {
   console.log('🤖 Starting Pump Platform Graduate Signal Bot (GeckoTerminal API)...');
   console.log(`📢 Sending signals to: ${CHANNEL_USERNAME}`);
   console.log(`📡 Source: GeckoTerminal API (${MAX_PAGES} pages)`);
-  console.log(`🌊 Primary Filter: Meteora pools only`);
+  console.log(`🌊 Primary Filter: Meteora + Meteora DAMM v2 pools only`);
   console.log(`🎓 Graduate Filter: Must exist on PumpFun/PumpSwap + Meteora`);
   console.log(`⏰ Age Filter: Only tokens ≤ 6 hours old`);
   console.log(`📈 Price Filter: ${config.requirePositivePriceChange ? 'Positive 24h change only' : 'Disabled'}`);
-  console.log(`🗄️  Storage: Redis (localhost:6379) - Atomic locks & deduplication`);
-  console.log(`🔒 Bulletproof Deduplication: Zero duplicate signals guaranteed`);
+  console.log(`💰 Market Cap Filter: Only tokens < $${(config.maxMarketCap / 1000000).toFixed(1)}M`);
+  console.log(`🗄️  Storage: Redis (localhost:6379) - Token-based deduplication`);
+  console.log(`🔒 Bulletproof Deduplication: One signal per token address guaranteed`);
   console.log(`⏱️  Cycle Interval: ${CYCLE_DELAY/1000} seconds`);
   
   // Connect to Redis
   try {
     await redisClient.connect();
-    const processedCount = await getProcessedPoolsCount();
-    console.log(`💾 Found ${processedCount} previously processed pools in Redis`);
+    const processedCount = await getProcessedTokensCount();
+    console.log(`💾 Found ${processedCount} previously processed tokens in Redis`);
     
     // Clean up any orphaned locks from previous runs (older than 10 minutes)
     try {
@@ -835,14 +845,15 @@ async function main() {
     const messagePromise = bot.sendMessage(CHANNEL_USERNAME, 
       '🤖 **Pump Graduate Bot Started (GeckoTerminal)!**\n\n' +
       '📊 **API Source:** GeckoTerminal (10 pages)\n' +
-      '🌊 **Primary Filter:** Meteora pools\n' +
+      '🌊 **Primary Filter:** Meteora + Meteora DAMM v2 pools\n' +
       '🎓 **Graduate Check:** PumpFun/PumpSwap verification\n' +
       '⏰ **Age Filter:** ≤6 hours old\n' +
       '📈 **Price Filter:** Positive 24h change\n' +
+      '💰 **Market Cap Filter:** < $15M USD\n' +
       '🛡️ **Safety:** RugCheck verification\n' +
-      '🔒 **Atomic Locks:** Bulletproof deduplication\n' +
-      '🚫 **Zero Duplicates:** Each pool signaled exactly once\n\n' +
-      '#BotStarted #PumpGraduate #AtomicLocks #ZeroDuplicates',
+      '🔒 **Token-based Deduplication:** One signal per token\n' +
+      '🚫 **Zero Duplicates:** Each token signaled exactly once\n\n' +
+      '#BotStarted #PumpGraduate #TokenDedup #MarketCapFilter',
       { parse_mode: 'Markdown' }
     );
     
