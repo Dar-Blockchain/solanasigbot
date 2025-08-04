@@ -403,6 +403,58 @@ async function fetchAllNewPools() {
 }
 
 // ==============================
+// TOKEN POOL AGE AND LIQUIDITY VERIFICATION
+// ==============================
+async function checkTokenPoolAge(tokenAddress) {
+  try {
+    console.log(`⏰ Checking oldest pool age for ${tokenAddress}...`);
+    
+    const response = await axiosWithTimeout({
+      method: 'get',
+      url: `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    }, 10000);
+    
+    if (!response.data || !response.data.pairs) {
+      console.log(`❌ No pairs data found for ${tokenAddress}`);
+      return { oldestPoolAgeHours: 0, hasValidPools: false };
+    }
+    
+    const pairs = response.data.pairs;
+    let oldestPoolAge = 0;
+    let hasValidPools = false;
+    
+    for (const pair of pairs) {
+      if (pair.pairCreatedAt) {
+        const createdTime = new Date(pair.pairCreatedAt);
+        const now = new Date();
+        const ageInMs = now - createdTime;
+        const ageInHours = ageInMs / (1000 * 60 * 60);
+        
+        if (ageInHours > oldestPoolAge) {
+          oldestPoolAge = ageInHours;
+        }
+        hasValidPools = true;
+      }
+    }
+    
+    console.log(`✅ Oldest pool age: ${oldestPoolAge.toFixed(2)} hours`);
+    
+    return {
+      oldestPoolAgeHours: oldestPoolAge,
+      hasValidPools: hasValidPools,
+      totalPairs: pairs.length
+    };
+    
+  } catch (error) {
+    console.error(`❌ Error checking pool age for ${tokenAddress}:`, error.message);
+    return { oldestPoolAgeHours: 0, hasValidPools: false };
+  }
+}
+
+// ==============================
 // PUMPFUN/PUMPSWAP VERIFICATION
 // ==============================
 async function checkPumpPools(tokenAddress) {
@@ -454,26 +506,7 @@ async function checkPumpPools(tokenAddress) {
   }
 }
 
-// ==============================
-// TOKEN SAFETY CHECK
-// ==============================
-async function checkTokenSafety(tokenAddress) {
-  try {
-    console.log(`🛡️ Checking safety for ${tokenAddress}...`);
-    const response = await axiosWithTimeout({
-      method: 'get',
-      url: `https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report/summary`
-    }, 10000);
-    await sleep(1000);
-    const score = response.data.score || 0;
-    const isSafe = score <= 400;
-    console.log(`✅ Safety check complete: ${score}/1000 (${isSafe ? 'SAFE' : 'RISKY'})`);
-    return { isSafe, score };
-  } catch (error) {
-    console.error('❌ RugCheck error:', error.message);
-    return { isSafe: false, score: null };
-  }
-}
+
 
 // ==============================
 // DATA PROCESSING FUNCTIONS
@@ -553,7 +586,7 @@ function extractPoolData(pool) {
 // ==============================
 // TELEGRAM SIGNAL FUNCTIONS
 // ==============================
-async function sendPumpGraduateSignal(poolData, pumpPools, safetyScore = null) {
+async function sendPumpGraduateSignal(poolData, pumpPools) {
   try {
     const { baseToken, pricing, ageData, poolAddress, transactions } = poolData;
     const symbol = baseToken.symbol;
@@ -564,8 +597,6 @@ async function sendPumpGraduateSignal(poolData, pumpPools, safetyScore = null) {
     const priceChange24h = pricing.priceChange24h;
     const tokenAddress = baseToken.address;
     const marketCap = pricing.fdvUsd;
-
-    const safetyInfo = safetyScore ? `🛡️ **Safety Score:** ${safetyScore}/1000 ✅\n` : '';
     
     // Determine which pump platforms the token is on
     const platformsFound = [];
@@ -581,7 +612,6 @@ async function sendPumpGraduateSignal(poolData, pumpPools, safetyScore = null) {
       `💧 **Liquidity:** $${liquidity.toLocaleString()}\n` +
       `📊 **24h Volume:** $${volume24h.toLocaleString()}\n` +
       `📈 **24h Change:** ${priceChange24h.toFixed(2)}%\n` +
-      `${safetyInfo}` +
       `\n📱 **24h Trading Activity:**\n` +
       `   • Buys: ${transactions.buys24h} (${transactions.buyers24h} buyers)\n` +
       `   • Sells: ${transactions.sells24h} (${transactions.sellers24h} sellers)\n\n` +
@@ -593,9 +623,8 @@ async function sendPumpGraduateSignal(poolData, pumpPools, safetyScore = null) {
       `📈 **GeckoTerminal:** https://www.geckoterminal.com/solana/pools/${poolAddress}\n\n` +
       `⚡ **Signal:** TOKEN GRADUATED FROM PUMP PLATFORM TO METEORA!\n` +
       `🎯 **Strategy:** Strong candidate - proven on pump platforms\n` +
-      `🛡️ **Safety:** Verified by RugCheck\n` +
-      `📡 **Source:** GeckoTerminal API (100 pages monitored)\n\n` +
-      `#Meteora #PumpGraduate #${platformsText.replace(/[^a-zA-Z0-9]/g, '')} #Solana #DeFi #${symbol} #SafeToken`;
+      `📡 **Source:** GeckoTerminal API with advanced filtering\n\n` +
+      `#Meteora #PumpGraduate #${platformsText.replace(/[^a-zA-Z0-9]/g, '')} #Solana #DeFi #${symbol} #NewListing`;
 
     // Send to channel
     try {
@@ -705,8 +734,25 @@ async function monitorMeteoraPools() {
                   await releaseTokenLock(baseTokenAddress);
                   continue;
                 }
-              
-                              console.log(`✅ ${symbol} passed age, price, and market cap filters - checking pump platforms...`);
+                
+                // Filter: Check liquidity (minimum required)
+                if (pricing.reserveUsd < config.minLiquidity) {
+                  console.log(`💧 Liquidity too low ($${pricing.reserveUsd.toLocaleString()} < $${config.minLiquidity.toLocaleString()}) - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                  continue;
+                }
+                
+                console.log(`✅ ${symbol} passed age, price, market cap, and liquidity filters - checking token pool age...`);
+                
+                // Filter: Check oldest pool age (must be under 24 hours)
+                const poolAgeInfo = await checkTokenPoolAge(baseTokenAddress);
+                if (poolAgeInfo.hasValidPools && poolAgeInfo.oldestPoolAgeHours > 24) {
+                  console.log(`⏰ Token has pools older than 24h (oldest: ${poolAgeInfo.oldestPoolAgeHours.toFixed(2)}h) - releasing lock`);
+                  await releaseTokenLock(baseTokenAddress);
+                  continue;
+                }
+                
+                console.log(`✅ ${symbol} passed all initial filters - checking pump platforms...`);
               
               // Check for PumpFun/PumpSwap pools
               const pumpPools = await checkPumpPools(baseTokenAddress);
@@ -723,25 +769,16 @@ async function monitorMeteoraPools() {
               if (pumpPools.hasPumpSwap) console.log(`   ✅ PumpSwap`);
               console.log(`   ✅ Meteora`);
               
-              // Check token safety before sending signal
-              const { isSafe, score } = await checkTokenSafety(baseTokenAddress);
+              console.log(`✅ ${symbol} passed all filters - sending signal!`);
               
-                              if (isSafe) {
-                  console.log(`✅ ${symbol} passed all filters including safety check - sending signal!`);
-                  
-                  // Send the signal (token is already marked as processed from checkAndMarkTokenAsProcessed)
-                  await sendPumpGraduateSignal(poolData, pumpPools, score);
-                  graduatesFound++;
-                  
-                  console.log(`🎯 Token ${baseTokenAddress} signal sent successfully!`);
-                  
-                  // Release the lock after successful signal
-                  await releaseTokenLock(baseTokenAddress);
-                  
-                } else {
-                  console.log(`❌ ${symbol} failed safety check - releasing lock`);
-                  await releaseTokenLock(baseTokenAddress);
-                }
+              // Send the signal (token is already marked as processed from checkAndMarkTokenAsProcessed)
+              await sendPumpGraduateSignal(poolData, pumpPools);
+              graduatesFound++;
+              
+              console.log(`🎯 Token ${baseTokenAddress} signal sent successfully!`);
+              
+              // Release the lock after successful signal
+              await releaseTokenLock(baseTokenAddress);
                 
               } catch (filterError) {
                 console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
@@ -810,6 +847,8 @@ async function main() {
   console.log(`⏰ Age Filter: Only tokens ≤ 6 hours old`);
   console.log(`📈 Price Filter: ${config.requirePositivePriceChange ? 'Positive 24h change only' : 'Disabled'}`);
   console.log(`💰 Market Cap Filter: Only tokens < $${(config.maxMarketCap / 1000000).toFixed(1)}M`);
+  console.log(`💧 Liquidity Filter: Minimum $${config.minLiquidity.toLocaleString()} USD`);
+  console.log(`⏰ Pool Age Filter: No pools older than 24 hours`);
   console.log(`🗄️  Storage: Redis (localhost:6379) - Token-based deduplication`);
   console.log(`🔒 Bulletproof Deduplication: One signal per token address guaranteed`);
   console.log(`⏱️  Cycle Interval: ${CYCLE_DELAY/1000} seconds`);
@@ -835,7 +874,7 @@ async function main() {
     
   } catch (redisError) {
     console.error('❌ Failed to connect to Redis:', redisError.message);
-    console.log('⚠️  Bot will continue but processed pools won\'t persist across restarts');
+    console.log('⚠️  Bot will continue but processed tokens won\'t persist across restarts');
     console.log('🔧 Make sure Redis server is running on localhost:6379');
   }
   
@@ -850,10 +889,11 @@ async function main() {
       '⏰ **Age Filter:** ≤6 hours old\n' +
       '📈 **Price Filter:** Positive 24h change\n' +
       '💰 **Market Cap Filter:** < $15M USD\n' +
-      '🛡️ **Safety:** RugCheck verification\n' +
+      '💧 **Liquidity Filter:** Min $10K USD\n' +
+      '⏰ **Pool Age Filter:** No pools > 24h old\n' +
       '🔒 **Token-based Deduplication:** One signal per token\n' +
       '🚫 **Zero Duplicates:** Each token signaled exactly once\n\n' +
-      '#BotStarted #PumpGraduate #TokenDedup #MarketCapFilter',
+      '#BotStarted #PumpGraduate #TokenDedup #AdvancedFilters',
       { parse_mode: 'Markdown' }
     );
     
