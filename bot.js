@@ -721,13 +721,8 @@ async function monitorMeteoraPools() {
                   continue;
                 }
                 
-                // Filter: Check if has positive price change
-                if (config.requirePositivePriceChange && pricing.priceChange24h <= 0) {
-                  console.log(`❌ Negative 24h price change (${pricing.priceChange24h.toFixed(2)}%) - releasing lock`);
-                  await releaseTokenLock(baseTokenAddress);
-                  continue;
-                }
                 
+      
                 // Filter: Check market cap (must be under $15M)
                 if (pricing.fdvUsd > config.maxMarketCap) {
                   console.log(`💰 Market cap too high ($${pricing.fdvUsd.toLocaleString()} > $${config.maxMarketCap.toLocaleString()}) - releasing lock`);
@@ -735,12 +730,7 @@ async function monitorMeteoraPools() {
                   continue;
                 }
                 
-                // Filter: Check liquidity (minimum required)
-                if (pricing.reserveUsd < config.minLiquidity) {
-                  console.log(`💧 Liquidity too low ($${pricing.reserveUsd.toLocaleString()} < $${config.minLiquidity.toLocaleString()}) - releasing lock`);
-                  await releaseTokenLock(baseTokenAddress);
-                  continue;
-                }
+               
                 
                 console.log(`✅ ${symbol} passed age, price, market cap, and liquidity filters - checking token pool age...`);
                 
