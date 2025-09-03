@@ -46,7 +46,7 @@ validateEnvironment();
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN_BOT1, { polling: true });
 const CHANNEL_USERNAME = '@solmemebot2'; // New channel username for bot1
 
-const PUMPSWAP_API_BASE = 'https://api.pumpswap.io/api/v1/tokens/new';
+const GECKOTERMINAL_API_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 const MAX_PAGES = 10; // Monitor 100 pages
 const REQUEST_DELAY = 1000; // 1 second delay between requests
 const CYCLE_DELAY = 60000; // 60 seconds between monitoring cycles
@@ -339,46 +339,64 @@ async function axiosWithTimeout(config, timeoutMs = 15000) {
 // ==============================
 // GECKOTERMINAL API FUNCTIONS
 // ==============================
-async function fetchNewTokensFromPumpSwap() {
+async function fetchNewPoolsFromPage(page) {
   try {
-    console.log(`📄 Fetching new tokens from PumpSwap...`);
+    console.log(`📄 Fetching page ${page} from GeckoTerminal...`);
     
     const response = await axiosWithTimeout({
       method: 'get',
-      url: PUMPSWAP_API_BASE,
+      url: `${GECKOTERMINAL_API_BASE}?include=dex&page=${page}`,
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     }, 15000);
     
-    if (!response.data || !response.data.tokens) {
-      console.log(`❌ No tokens data found from PumpSwap`);
+    if (!response.data || !response.data.data) {
+      console.log(`❌ No data found on page ${page}`);
       return [];
     }
     
-    const tokens = response.data.tokens;
-    console.log(`📊 Found ${tokens.length} tokens from PumpSwap`);
+    const pools = response.data.data;
+    console.log(`📊 Found ${pools.length} pools on page ${page}`);
     
-    return tokens;
+    return pools;
     
   } catch (error) {
-    console.error(`❌ Error fetching from PumpSwap:`, error.message);
+    console.error(`❌ Error fetching page ${page}:`, error.message);
     return [];
   }
 }
 
-async function fetchAllNewTokens() {
+async function fetchAllNewPools() {
   try {
-    console.log(`🔍 Fetching new tokens from PumpSwap...`);
+    console.log(`🔍 Fetching new pools from GeckoTerminal (pages 1-${MAX_PAGES})...`);
     
-    const tokens = await fetchNewTokensFromPumpSwap();
+    let allPumpSwapPools = [];
     
-    console.log(`📊 Total tokens found: ${tokens.length}`);
-    return tokens;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const pools = await fetchNewPoolsFromPage(page);
+      
+      // Filter for PumpSwap pools on this page
+      const pumpSwapPoolsOnPage = pools.filter(pool => {
+        const dexId = pool.relationships?.dex?.data?.id;
+        return dexId === 'pumpswap';
+      });
+      
+      console.log(`🚀 PumpSwap pools on page ${page}: ${pumpSwapPoolsOnPage.length}`);
+      allPumpSwapPools = allPumpSwapPools.concat(pumpSwapPoolsOnPage);
+      
+      // Add delay between requests to avoid rate limiting
+      if (page < MAX_PAGES) {
+        await sleep(REQUEST_DELAY);
+      }
+    }
+    
+    console.log(`📊 Total PumpSwap pools found: ${allPumpSwapPools.length}`);
+    return allPumpSwapPools;
     
   } catch (error) {
-    console.error('❌ Error fetching tokens:', error.message);
+    console.error('❌ Error fetching pools:', error.message);
     return [];
   }
 }
@@ -387,44 +405,59 @@ async function fetchAllNewTokens() {
 // ==============================
 // DATA PROCESSING FUNCTIONS
 // ==============================
-function extractTokenData(token) {
+function extractPoolData(pool) {
   try {
-    const tokenAddress = token.address;
-    const tokenName = token.name || 'Unknown Token';
-    const tokenSymbol = token.symbol || 'Unknown';
-    const createdAt = token.created_at || token.createdAt;
+    const attributes = pool.attributes;
+    const relationships = pool.relationships;
+    
+    const poolAddress = attributes.address;
+    const poolName = attributes.name;
+    const createdAt = attributes.pool_created_at;
+    const baseTokenId = relationships.base_token?.data?.id;
+    const quoteTokenId = relationships.quote_token?.data?.id;
+    const dexId = relationships.dex?.data?.id;
+    
+    // Extract base token address from ID (format: "solana_TOKENADDRESS")
+    const baseTokenAddress = baseTokenId ? baseTokenId.replace('solana_', '') : null;
+    const quoteTokenAddress = quoteTokenId ? quoteTokenId.replace('solana_', '') : null;
     
     // Parse age
     const ageData = parsePoolAge(createdAt);
     
     // Extract pricing and volume data
-    const baseTokenPriceUsd = parseFloat(token.price_usd) || 0;
-    const fdvUsd = parseFloat(token.fdv_usd) || parseFloat(token.marketCap) || 0;
-    const reserveUsd = parseFloat(token.liquidity_usd) || parseFloat(token.liquidity) || 0;
+    const baseTokenPriceUsd = parseFloat(attributes.base_token_price_usd) || 0;
+    const fdvUsd = parseFloat(attributes.fdv_usd) || 0;
+    const marketCapUsd = parseFloat(attributes.market_cap_usd) || null;
+    const reserveUsd = parseFloat(attributes.reserve_in_usd) || 0;
     
     // Extract volume data
-    const volume24h = parseFloat(token.volume_24h) || parseFloat(token.volume24h) || 0;
+    const volumeUsd = attributes.volume_usd || {};
+    const volume24h = parseFloat(volumeUsd.h24) || 0;
     
     return {
-      tokenAddress,
-      tokenName,
-      tokenSymbol,
+      poolAddress,
+      poolName,
+      poolId: pool.id,
       createdAt,
       ageData,
+      baseTokenAddress,
+      quoteTokenAddress,
+      dexId,
       baseToken: {
-        address: tokenAddress,
-        symbol: tokenSymbol,
-        name: tokenName
+        address: baseTokenAddress,
+        symbol: poolName.split(' / ')[0] || 'Unknown',
+        name: poolName.split(' / ')[0] || 'Unknown Token'
       },
       pricing: {
         baseTokenPriceUsd,
         fdvUsd,
+        marketCapUsd,
         reserveUsd,
         volume24h
       }
     };
   } catch (error) {
-    console.error('❌ Error extracting token data:', error);
+    console.error('❌ Error extracting pool data:', error);
     return null;
   }
 }
@@ -432,29 +465,32 @@ function extractTokenData(token) {
 // ==============================
 // TELEGRAM SIGNAL FUNCTIONS
 // ==============================
-async function sendPumpSwapTokenSignal(tokenData) {
+async function sendPumpSwapTokenSignal(poolData) {
   try {
-    const { baseToken, pricing, ageData, tokenAddress } = tokenData;
+    const { baseToken, pricing, ageData, poolAddress } = poolData;
     const symbol = baseToken.symbol;
     const name = baseToken.name;
     const price = pricing.baseTokenPriceUsd;
     const liquidity = pricing.reserveUsd;
     const volume24h = pricing.volume24h;
+    const tokenAddress = baseToken.address;
     const marketCap = pricing.fdvUsd;
 
     const message = `🚀 **NEW PUMPSWAP TOKEN** 🚀\n\n` +
       `📊 **Token:** ${name} (${symbol})\n` +
-      `⏰ **Age:** ${ageData.ageString}\n` +
+      `⏰ **Pool Age:** ${ageData.ageString}\n` +
       `💰 **Price:** $${price.toFixed(8)}\n` +
       `📈 **Market Cap:** $${marketCap.toLocaleString()}\n` +
       `💧 **Liquidity:** $${liquidity.toLocaleString()}\n` +
       `📊 **24h Volume:** $${volume24h.toLocaleString()}\n` +
-      `🔗 **Token Address:** \`${tokenAddress}\`\n\n` +
+      `🔗 **Token Address:** \`${tokenAddress}\`\n` +
+      `🔗 **Pool Address:** \`${poolAddress}\`\n\n` +
       `📊 **DexScreener:** https://dexscreener.com/solana/${tokenAddress}\n` +
-      `🌐 **PumpSwap:** https://pumpswap.io/token/${tokenAddress}\n\n` +
+      `🌐 **PumpSwap:** https://pump.fun/${tokenAddress}\n` +
+      `📈 **GeckoTerminal:** https://www.geckoterminal.com/solana/pools/${poolAddress}\n\n` +
       `⚡ **Signal:** NEW TOKEN FROM PUMPSWAP!\n` +
       `🎯 **Strategy:** Fresh token under 6 hours old\n` +
-      `📡 **Source:** PumpSwap API\n\n` +
+      `📡 **Source:** GeckoTerminal API filtering PumpSwap\n\n` +
       `#PumpSwap #NewToken #Solana #DeFi #${symbol} #Fresh`;
 
     // Send to channel
@@ -499,78 +535,80 @@ async function monitorPumpSwapTokens() {
     try {
       console.log(`\n🔄 Starting monitoring cycle #${cycleCount} at ${new Date().toLocaleTimeString()}`);
       
-      const tokens = await fetchAllNewTokens();
+      const pumpSwapPools = await fetchAllNewPools();
       
-      if (tokens.length === 0) {
-        console.log('⏳ No new tokens found from PumpSwap');
+      if (pumpSwapPools.length === 0) {
+        console.log('⏳ No new PumpSwap pools found');
         errorCount++;
       } else {
         errorCount = 0; // Reset error count on success
-        console.log(`📝 Processing ${tokens.length} PumpSwap tokens...`);
+        console.log(`📝 Processing ${pumpSwapPools.length} PumpSwap pools...`);
         
         let tokensFound = 0;
         
-        for (let i = 0; i < tokens.length; i++) {
-          const token = tokens[i];
+        for (let i = 0; i < pumpSwapPools.length; i++) {
+          const pool = pumpSwapPools[i];
           
           try {
-            const tokenData = extractTokenData(token);
-            if (!tokenData) {
-              console.log(`❌ Failed to extract data for token ${i + 1}`);
+            const poolData = extractPoolData(pool);
+            if (!poolData) {
+              console.log(`❌ Failed to extract data for pool ${i + 1}`);
               continue;
             }
             
-            const { tokenAddress, baseToken, ageData, pricing } = tokenData;
+            const { baseTokenAddress, baseToken, ageData, pricing, poolAddress } = poolData;
             const symbol = baseToken.symbol;
             
-            console.log(`\n[${i + 1}/${tokens.length}] Processing: ${symbol} (${tokenAddress})`);
+            console.log(`\n[${i + 1}/${pumpSwapPools.length}] Processing: ${symbol} (${baseTokenAddress})`);
+            console.log(`📍 Pool: ${poolAddress}`);
             console.log(`⏰ Age: ${ageData.ageString}`);
             
             // ATOMIC CHECK: Use token address for deduplication to prevent duplicate signals for same token
-            const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(tokenAddress, {
+            const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(baseTokenAddress, {
               reason: 'pumpswap_processing',
               symbol,
+              poolAddress,
               age: ageData.ageString,
               liquidity: pricing.reserveUsd
             });
             
             if (wasAlreadyProcessed) {
-              console.log(`⏭️  Token ${tokenAddress} already processed/locked - skipping to prevent duplicate signal`);
+              console.log(`⏭️  Token ${baseTokenAddress} already processed/locked - skipping to prevent duplicate signal`);
               continue;
             }
             
-            console.log(`🔒 Acquired exclusive lock for token ${tokenAddress} - proceeding with filters...`);
+            console.log(`🔒 Acquired exclusive lock for token ${baseTokenAddress} (pool: ${poolAddress}) - proceeding with filters...`);
             
             try {
-              // Filter: Check token age (6 hours or newer)
+              // Filter: Check pool age (6 hours or newer)
               if (!isTokenNewEnough(ageData.ageInHours)) {
                 console.log(`⏰ Token is too old (${ageData.ageString}) - releasing lock`);
-                await releaseTokenLock(tokenAddress);
+                await releaseTokenLock(baseTokenAddress);
                 continue;
               }
               
               // Filter: Check liquidity (minimum $1k)
               if (pricing.reserveUsd < config.minLiquidity) {
                 console.log(`💧 Liquidity too low ($${pricing.reserveUsd.toLocaleString()} < $${config.minLiquidity.toLocaleString()}) - releasing lock`);
-                await releaseTokenLock(tokenAddress);
+                await releaseTokenLock(baseTokenAddress);
                 continue;
               }
               
               console.log(`✅ ${symbol} passed all filters - sending signal!`);
               
               // Send the signal (token is already marked as processed from checkAndMarkTokenAsProcessed)
-              await sendPumpSwapTokenSignal(tokenData);
+              await sendPumpSwapTokenSignal(poolData);
               tokensFound++;
               
-              console.log(`🎯 Token ${tokenAddress} signal sent successfully!`);
+              console.log(`🎯 Token ${baseTokenAddress} signal sent successfully!`);
               
               // Release the lock after successful signal
-              await releaseTokenLock(tokenAddress);
+              await releaseTokenLock(baseTokenAddress);
                 
             } catch (filterError) {
               console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
               // Always release lock on error
-              await releaseTokenLock(tokenAddress);
+              await releaseTokenLock(baseTokenAddress);
             }
             
             // Rate limiting between tokens
