@@ -46,15 +46,13 @@ validateEnvironment();
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN_BOT1, { polling: true });
 const CHANNEL_USERNAME = '@solmemebot2'; // New channel username for bot1
 
-const GECKOTERMINAL_API_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
+const PUMPSWAP_API_BASE = 'https://api.pumpswap.io/api/v1/tokens/new';
 const MAX_PAGES = 10; // Monitor 100 pages
 const REQUEST_DELAY = 1000; // 1 second delay between requests
 const CYCLE_DELAY = 60000; // 60 seconds between monitoring cycles
 
 const config = {
-  minLiquidity: parseInt(process.env.MIN_LIQUIDITY) || 10000,
-  requirePositivePriceChange: true, // Only process tokens with positive 24h price change
-  maxMarketCap: 15000000, // Maximum market cap: $15M USD
+  minLiquidity: parseInt(process.env.MIN_LIQUIDITY) || 1000, // Minimum $1k liquidity
 };
 
 // ==============================
@@ -341,256 +339,92 @@ async function axiosWithTimeout(config, timeoutMs = 15000) {
 // ==============================
 // GECKOTERMINAL API FUNCTIONS
 // ==============================
-async function fetchNewPoolsFromPage(page) {
+async function fetchNewTokensFromPumpSwap() {
   try {
-    console.log(`📄 Fetching page ${page} from GeckoTerminal...`);
+    console.log(`📄 Fetching new tokens from PumpSwap...`);
     
     const response = await axiosWithTimeout({
       method: 'get',
-      url: `${GECKOTERMINAL_API_BASE}?include=dex&page=${page}`,
+      url: PUMPSWAP_API_BASE,
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     }, 15000);
     
-    if (!response.data || !response.data.data) {
-      console.log(`❌ No data found on page ${page}`);
+    if (!response.data || !response.data.tokens) {
+      console.log(`❌ No tokens data found from PumpSwap`);
       return [];
     }
     
-    const pools = response.data.data;
-    console.log(`📊 Found ${pools.length} pools on page ${page}`);
+    const tokens = response.data.tokens;
+    console.log(`📊 Found ${tokens.length} tokens from PumpSwap`);
     
-    return pools;
+    return tokens;
     
   } catch (error) {
-    console.error(`❌ Error fetching page ${page}:`, error.message);
+    console.error(`❌ Error fetching from PumpSwap:`, error.message);
     return [];
   }
 }
 
-async function fetchAllNewPools() {
+async function fetchAllNewTokens() {
   try {
-    console.log(`🔍 Fetching new pools from GeckoTerminal (pages 1-${MAX_PAGES})...`);
+    console.log(`🔍 Fetching new tokens from PumpSwap...`);
     
-    let allMeteoraPools = [];
+    const tokens = await fetchNewTokensFromPumpSwap();
     
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const pools = await fetchNewPoolsFromPage(page);
-      
-      // Filter for Meteora DAMMv2 pools on this page
-      const meteoraPoolsOnPage = pools.filter(pool => {
-        const dexId = pool.relationships?.dex?.data?.id;
-        return dexId === 'meteora' || dexId === 'meteora-damm-v2';
-      });
-      
-      console.log(`🌊 Meteora DAMMv2 pools on page ${page}: ${meteoraPoolsOnPage.length}`);
-      allMeteoraPools = allMeteoraPools.concat(meteoraPoolsOnPage);
-      
-      // Add delay between requests to avoid rate limiting
-      if (page < MAX_PAGES) {
-        await sleep(REQUEST_DELAY);
-      }
-    }
-    
-    console.log(`📊 Total Meteora DAMMv2 pools found: ${allMeteoraPools.length}`);
-    return allMeteoraPools;
+    console.log(`📊 Total tokens found: ${tokens.length}`);
+    return tokens;
     
   } catch (error) {
-    console.error('❌ Error fetching pools:', error.message);
+    console.error('❌ Error fetching tokens:', error.message);
     return [];
   }
 }
 
-// ==============================
-// TOKEN POOL AGE AND LIQUIDITY VERIFICATION
-// ==============================
-async function checkTokenPoolAge(tokenAddress) {
-  try {
-    console.log(`⏰ Checking oldest pool age for ${tokenAddress}...`);
-    
-    const response = await axiosWithTimeout({
-      method: 'get',
-      url: `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    }, 10000);
-    
-    if (!response.data || !response.data.pairs) {
-      console.log(`❌ No pairs data found for ${tokenAddress}`);
-      return { oldestPoolAgeHours: 0, hasValidPools: false };
-    }
-    
-    const pairs = response.data.pairs;
-    let oldestPoolAge = 0;
-    let hasValidPools = false;
-    
-    for (const pair of pairs) {
-      if (pair.pairCreatedAt) {
-        const createdTime = new Date(pair.pairCreatedAt);
-        const now = new Date();
-        const ageInMs = now - createdTime;
-        const ageInHours = ageInMs / (1000 * 60 * 60);
-        
-        if (ageInHours > oldestPoolAge) {
-          oldestPoolAge = ageInHours;
-        }
-        hasValidPools = true;
-      }
-    }
-    
-    console.log(`✅ Oldest pool age: ${oldestPoolAge.toFixed(2)} hours`);
-    
-    return {
-      oldestPoolAgeHours: oldestPoolAge,
-      hasValidPools: hasValidPools,
-      totalPairs: pairs.length
-    };
-    
-  } catch (error) {
-    console.error(`❌ Error checking pool age for ${tokenAddress}:`, error.message);
-    return { oldestPoolAgeHours: 0, hasValidPools: false };
-  }
-}
-
-// ==============================
-// RAYDIUM LAUNCHLAB/CPMM VERIFICATION
-// ==============================
-async function checkRaydiumPools(tokenAddress) {
-  try {
-    console.log(`🔍 Checking Raydium Launchlab/CPMM pools for ${tokenAddress}...`);
-    
-    const response = await axiosWithTimeout({
-      method: 'get',
-      url: `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    }, 10000);
-    
-    if (!response.data || !response.data.pairs) {
-      console.log(`❌ No pairs data found for ${tokenAddress}`);
-      return { hasRaydiumLaunchlab: false, hasRaydiumCPMM: false, pairs: [] };
-    }
-    
-    const pairs = response.data.pairs;
-    
-    // Check for Raydium Launchlab pools
-    const raydiumLaunchlabPairs = pairs.filter(pair => 
-      pair.dexId === 'raydium' && (
-        pair.url?.includes('launchlab') ||
-        pair.url?.includes('launchpad') ||
-        pair.labels?.includes('launchlab') ||
-        pair.labels?.includes('launchpad') ||
-        (pair.dexId === 'raydium' && pair.labels?.some(label => 
-          label.toLowerCase().includes('launch') || 
-          label.toLowerCase().includes('lab')
-        ))
-      )
-    );
-    
-    // Check for Raydium CPMM pools
-    const raydiumCPMMPairs = pairs.filter(pair => 
-      pair.dexId === 'raydium' && (
-        pair.url?.includes('cpmm') ||
-        pair.labels?.includes('cpmm') ||
-        pair.labels?.includes('CPMM') ||
-        (pair.dexId === 'raydium' && !pair.url?.includes('launchlab') && !pair.url?.includes('launchpad'))
-      )
-    );
-    
-    const hasRaydiumLaunchlab = raydiumLaunchlabPairs.length > 0;
-    const hasRaydiumCPMM = raydiumCPMMPairs.length > 0;
-    
-    console.log(`✅ Raydium Launchlab pools: ${raydiumLaunchlabPairs.length}, Raydium CPMM pools: ${raydiumCPMMPairs.length}`);
-    
-    return {
-      hasRaydiumLaunchlab,
-      hasRaydiumCPMM,
-      raydiumLaunchlabPairs,
-      raydiumCPMMPairs,
-      allPairs: pairs
-    };
-    
-  } catch (error) {
-    console.error(`❌ Error checking Raydium pools for ${tokenAddress}:`, error.message);
-    return { hasRaydiumLaunchlab: false, hasRaydiumCPMM: false, pairs: [] };
-  }
-}
 
 // ==============================
 // DATA PROCESSING FUNCTIONS
 // ==============================
-function extractPoolData(pool) {
+function extractTokenData(token) {
   try {
-    const attributes = pool.attributes;
-    const relationships = pool.relationships;
-    
-    const poolAddress = attributes.address;
-    const poolName = attributes.name;
-    const createdAt = attributes.pool_created_at;
-    const baseTokenId = relationships.base_token?.data?.id;
-    const quoteTokenId = relationships.quote_token?.data?.id;
-    const dexId = relationships.dex?.data?.id;
-    
-    // Extract base token address from ID (format: "solana_TOKENADDRESS")
-    const baseTokenAddress = baseTokenId ? baseTokenId.replace('solana_', '') : null;
-    const quoteTokenAddress = quoteTokenId ? quoteTokenId.replace('solana_', '') : null;
+    const tokenAddress = token.address;
+    const tokenName = token.name || 'Unknown Token';
+    const tokenSymbol = token.symbol || 'Unknown';
+    const createdAt = token.created_at || token.createdAt;
     
     // Parse age
     const ageData = parsePoolAge(createdAt);
     
     // Extract pricing and volume data
-    const baseTokenPriceUsd = parseFloat(attributes.base_token_price_usd) || 0;
-    const fdvUsd = parseFloat(attributes.fdv_usd) || 0;
-    const marketCapUsd = parseFloat(attributes.market_cap_usd) || null;
-    const reserveUsd = parseFloat(attributes.reserve_in_usd) || 0;
-    
-    // Extract price changes
-    const priceChanges = attributes.price_change_percentage || {};
-    const priceChange24h = parseFloat(priceChanges.h24) || 0;
+    const baseTokenPriceUsd = parseFloat(token.price_usd) || 0;
+    const fdvUsd = parseFloat(token.fdv_usd) || parseFloat(token.marketCap) || 0;
+    const reserveUsd = parseFloat(token.liquidity_usd) || parseFloat(token.liquidity) || 0;
     
     // Extract volume data
-    const volumeUsd = attributes.volume_usd || {};
-    const volume24h = parseFloat(volumeUsd.h24) || 0;
-    
-    // Extract transaction data
-    const transactions = attributes.transactions || {};
-    const txData24h = transactions.h24 || {};
+    const volume24h = parseFloat(token.volume_24h) || parseFloat(token.volume24h) || 0;
     
     return {
-      poolAddress,
-      poolName,
-      poolId: pool.id,
+      tokenAddress,
+      tokenName,
+      tokenSymbol,
       createdAt,
       ageData,
-      baseTokenAddress,
-      quoteTokenAddress,
-      dexId,
       baseToken: {
-        address: baseTokenAddress,
-        symbol: poolName.split(' / ')[0] || 'Unknown',
-        name: poolName.split(' / ')[0] || 'Unknown Token'
+        address: tokenAddress,
+        symbol: tokenSymbol,
+        name: tokenName
       },
       pricing: {
         baseTokenPriceUsd,
         fdvUsd,
-        marketCapUsd,
         reserveUsd,
-        priceChange24h,
         volume24h
-      },
-      transactions: {
-        buys24h: txData24h.buys || 0,
-        sells24h: txData24h.sells || 0,
-        buyers24h: txData24h.buyers || 0,
-        sellers24h: txData24h.sellers || 0
       }
     };
   } catch (error) {
-    console.error('❌ Error extracting pool data:', error);
+    console.error('❌ Error extracting token data:', error);
     return null;
   }
 }
@@ -598,45 +432,30 @@ function extractPoolData(pool) {
 // ==============================
 // TELEGRAM SIGNAL FUNCTIONS
 // ==============================
-async function sendRaydiumGraduateSignal(poolData, raydiumPools) {
+async function sendPumpSwapTokenSignal(tokenData) {
   try {
-    const { baseToken, pricing, ageData, poolAddress, transactions } = poolData;
+    const { baseToken, pricing, ageData, tokenAddress } = tokenData;
     const symbol = baseToken.symbol;
     const name = baseToken.name;
     const price = pricing.baseTokenPriceUsd;
     const liquidity = pricing.reserveUsd;
     const volume24h = pricing.volume24h;
-    const priceChange24h = pricing.priceChange24h;
-    const tokenAddress = baseToken.address;
     const marketCap = pricing.fdvUsd;
-    
-    // Determine which Raydium platforms the token is on
-    const platformsFound = [];
-    if (raydiumPools.hasRaydiumLaunchlab) platformsFound.push('Raydium Launchlab');
-    if (raydiumPools.hasRaydiumCPMM) platformsFound.push('Raydium CPMM');
-    const platformsText = platformsFound.join(' + ');
 
-    const message = `🚀 **RAYDIUM GRADUATE TO METEORA** 🚀\n\n` +
+    const message = `🚀 **NEW PUMPSWAP TOKEN** 🚀\n\n` +
       `📊 **Token:** ${name} (${symbol})\n` +
-      `⏰ **Pool Age:** ${ageData.ageString}\n` +
+      `⏰ **Age:** ${ageData.ageString}\n` +
       `💰 **Price:** $${price.toFixed(8)}\n` +
       `📈 **Market Cap:** $${marketCap.toLocaleString()}\n` +
       `💧 **Liquidity:** $${liquidity.toLocaleString()}\n` +
       `📊 **24h Volume:** $${volume24h.toLocaleString()}\n` +
-      `📈 **24h Change:** ${priceChange24h.toFixed(2)}%\n` +
-      `\n📱 **24h Trading Activity:**\n` +
-      `   • Buys: ${transactions.buys24h} (${transactions.buyers24h} buyers)\n` +
-      `   • Sells: ${transactions.sells24h} (${transactions.sellers24h} sellers)\n\n` +
-      `🎓 **Graduation Path:** ${platformsText} → Meteora DAMMv2\n` +
-      `🔗 **Token Address:** \`${tokenAddress}\`\n` +
-      `🔗 **Pool Address:** \`${poolAddress}\`\n\n` +
+      `🔗 **Token Address:** \`${tokenAddress}\`\n\n` +
       `📊 **DexScreener:** https://dexscreener.com/solana/${tokenAddress}\n` +
-      `🌐 **Meteora:** https://app.meteora.ag/pools/${poolAddress}\n` +
-      `📈 **GeckoTerminal:** https://www.geckoterminal.com/solana/pools/${poolAddress}\n\n` +
-      `⚡ **Signal:** TOKEN GRADUATED FROM RAYDIUM TO METEORA DAMMV2!\n` +
-      `🎯 **Strategy:** Strong candidate - proven on Raydium ecosystem\n` +
-      `📡 **Source:** GeckoTerminal API with Raydium pipeline filtering\n\n` +
-      `#Meteora #RaydiumGraduate #${platformsText.replace(/[^a-zA-Z0-9]/g, '')} #Solana #DeFi #${symbol} #NewListing`;
+      `🌐 **PumpSwap:** https://pumpswap.io/token/${tokenAddress}\n\n` +
+      `⚡ **Signal:** NEW TOKEN FROM PUMPSWAP!\n` +
+      `🎯 **Strategy:** Fresh token under 6 hours old\n` +
+      `📡 **Source:** PumpSwap API\n\n` +
+      `#PumpSwap #NewToken #Solana #DeFi #${symbol} #Fresh`;
 
     // Send to channel
     try {
@@ -650,7 +469,7 @@ async function sendRaydiumGraduateSignal(poolData, raydiumPools) {
       );
       
       await Promise.race([messagePromise, timeoutPromise]);
-      console.log(`✅ Sent Raydium graduate signal for ${symbol} to ${CHANNEL_USERNAME}`);
+      console.log(`✅ Sent PumpSwap token signal for ${symbol} to ${CHANNEL_USERNAME}`);
     } catch (messageError) {
       console.error(`❌ Failed to send signal for ${symbol}:`, messageError.message);
       if (messageError.message.includes('timeout')) {
@@ -668,8 +487,8 @@ async function sendRaydiumGraduateSignal(poolData, raydiumPools) {
 // ==============================
 // MAIN MONITORING LOOP
 // ==============================
-async function monitorMeteoraPools() {
-  console.log('🔍 Starting Raydium graduate monitoring...');
+async function monitorPumpSwapTokens() {
+  console.log('🔍 Starting PumpSwap token monitoring...');
   let cycleCount = 0;
   let errorCount = 0;
   
@@ -680,110 +499,78 @@ async function monitorMeteoraPools() {
     try {
       console.log(`\n🔄 Starting monitoring cycle #${cycleCount} at ${new Date().toLocaleTimeString()}`);
       
-      const meteoraPools = await fetchAllNewPools();
+      const tokens = await fetchAllNewTokens();
       
-      if (meteoraPools.length === 0) {
-        console.log('⏳ No new Meteora DAMMv2 pools found');
+      if (tokens.length === 0) {
+        console.log('⏳ No new tokens found from PumpSwap');
         errorCount++;
       } else {
         errorCount = 0; // Reset error count on success
-        console.log(`📝 Processing ${meteoraPools.length} Meteora DAMMv2 pools...`);
+        console.log(`📝 Processing ${tokens.length} PumpSwap tokens...`);
         
-        let graduatesFound = 0;
+        let tokensFound = 0;
         
-        for (let i = 0; i < meteoraPools.length; i++) {
-          const pool = meteoraPools[i];
+        for (let i = 0; i < tokens.length; i++) {
+          const token = tokens[i];
           
           try {
-            const poolData = extractPoolData(pool);
-            if (!poolData) {
-              console.log(`❌ Failed to extract data for pool ${i + 1}`);
+            const tokenData = extractTokenData(token);
+            if (!tokenData) {
+              console.log(`❌ Failed to extract data for token ${i + 1}`);
               continue;
             }
             
-            const { baseTokenAddress, baseToken, ageData, pricing, poolAddress } = poolData;
+            const { tokenAddress, baseToken, ageData, pricing } = tokenData;
             const symbol = baseToken.symbol;
             
-            console.log(`\n[${i + 1}/${meteoraPools.length}] Processing: ${symbol} (${baseTokenAddress})`);
-            console.log(`📍 Pool: ${poolAddress}`);
+            console.log(`\n[${i + 1}/${tokens.length}] Processing: ${symbol} (${tokenAddress})`);
             console.log(`⏰ Age: ${ageData.ageString}`);
             
             // ATOMIC CHECK: Use token address for deduplication to prevent duplicate signals for same token
-            const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(baseTokenAddress, {
-              reason: 'initial_processing',
+            const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(tokenAddress, {
+              reason: 'pumpswap_processing',
               symbol,
-              poolAddress,
               age: ageData.ageString,
-              priceChange24h: pricing.priceChange24h,
-              marketCap: pricing.fdvUsd
+              liquidity: pricing.reserveUsd
             });
             
             if (wasAlreadyProcessed) {
-              console.log(`⏭️  Token ${baseTokenAddress} already processed/locked - skipping to prevent duplicate signal`);
+              console.log(`⏭️  Token ${tokenAddress} already processed/locked - skipping to prevent duplicate signal`);
               continue;
             }
             
-            console.log(`🔒 Acquired exclusive lock for token ${baseTokenAddress} (pool: ${poolAddress}) - proceeding with filters...`);
+            console.log(`🔒 Acquired exclusive lock for token ${tokenAddress} - proceeding with filters...`);
             
             try {
-              // Filter: Check pool age (6 hours or newer)
+              // Filter: Check token age (6 hours or newer)
               if (!isTokenNewEnough(ageData.ageInHours)) {
                 console.log(`⏰ Token is too old (${ageData.ageString}) - releasing lock`);
-                await releaseTokenLock(baseTokenAddress);
+                await releaseTokenLock(tokenAddress);
                 continue;
               }
               
-              // Filter: Check market cap (must be under $15M)
-              if (pricing.fdvUsd > config.maxMarketCap) {
-                console.log(`💰 Market cap too high ($${pricing.fdvUsd.toLocaleString()} > $${config.maxMarketCap.toLocaleString()}) - releasing lock`);
-                await releaseTokenLock(baseTokenAddress);
+              // Filter: Check liquidity (minimum $1k)
+              if (pricing.reserveUsd < config.minLiquidity) {
+                console.log(`💧 Liquidity too low ($${pricing.reserveUsd.toLocaleString()} < $${config.minLiquidity.toLocaleString()}) - releasing lock`);
+                await releaseTokenLock(tokenAddress);
                 continue;
               }
-              
-              console.log(`✅ ${symbol} passed age, price, market cap, and liquidity filters - checking token pool age...`);
-              
-              // Filter: Check oldest pool age (must be under 24 hours)
-              const poolAgeInfo = await checkTokenPoolAge(baseTokenAddress);
-              if (poolAgeInfo.hasValidPools && poolAgeInfo.oldestPoolAgeHours > 24) {
-                console.log(`⏰ Token has pools older than 24h (oldest: ${poolAgeInfo.oldestPoolAgeHours.toFixed(2)}h) - releasing lock`);
-                await releaseTokenLock(baseTokenAddress);
-                continue;
-              }
-              
-              console.log(`✅ ${symbol} passed all initial filters - checking Raydium platforms...`);
-            
-              // Check for Raydium Launchlab/CPMM pools
-              const raydiumPools = await checkRaydiumPools(baseTokenAddress);
-              
-              // Filter: Only include tokens that ARE on both Raydium Launchlab and CPMM
-              if (!raydiumPools.hasRaydiumLaunchlab || !raydiumPools.hasRaydiumCPMM) {
-                console.log(`🚫 ${symbol} is NOT on both Raydium Launchlab and CPMM - releasing lock`);
-                console.log(`   Launchlab: ${raydiumPools.hasRaydiumLaunchlab ? '✅' : '❌'}`);
-                console.log(`   CPMM: ${raydiumPools.hasRaydiumCPMM ? '✅' : '❌'}`);
-                await releaseTokenLock(baseTokenAddress);
-                continue;
-              }
-            
-              console.log(`🎓 ${symbol} is a Raydium graduate! Found on:`);
-              if (raydiumPools.hasRaydiumLaunchlab) console.log(`   ✅ Raydium Launchlab`);
-              if (raydiumPools.hasRaydiumCPMM) console.log(`   ✅ Raydium CPMM`);
-              console.log(`   ✅ Meteora DAMMv2`);
               
               console.log(`✅ ${symbol} passed all filters - sending signal!`);
               
               // Send the signal (token is already marked as processed from checkAndMarkTokenAsProcessed)
-              await sendRaydiumGraduateSignal(poolData, raydiumPools);
-              graduatesFound++;
+              await sendPumpSwapTokenSignal(tokenData);
+              tokensFound++;
               
-              console.log(`🎯 Token ${baseTokenAddress} signal sent successfully!`);
+              console.log(`🎯 Token ${tokenAddress} signal sent successfully!`);
               
               // Release the lock after successful signal
-              await releaseTokenLock(baseTokenAddress);
+              await releaseTokenLock(tokenAddress);
                 
             } catch (filterError) {
               console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
               // Always release lock on error
-              await releaseTokenLock(baseTokenAddress);
+              await releaseTokenLock(tokenAddress);
             }
             
             // Rate limiting between tokens
@@ -795,7 +582,7 @@ async function monitorMeteoraPools() {
           }
         }
         
-        console.log(`\n🎯 Found ${graduatesFound} Raydium graduates`);
+        console.log(`\n🎯 Found ${tokensFound} valid PumpSwap tokens`);
       }
       
       const cycleTime = ((Date.now() - cycleStartTime) / 1000).toFixed(1);
@@ -882,18 +669,13 @@ async function main() {
   console.log('🔍 Testing channel connection...');
   try {
     const messagePromise = bot.sendMessage(CHANNEL_USERNAME, 
-      '🤖 **Raydium Graduate Bot1 Started (GeckoTerminal)!**\n\n' +
-      '📊 **API Source:** GeckoTerminal (10 pages)\n' +
-      '🌊 **Primary Filter:** Meteora + Meteora DAMM v2 pools\n' +
-      '🎓 **Graduate Check:** Raydium Launchlab + CPMM verification\n' +
-      '⏰ **Age Filter:** ≤6 hours old\n' +
-      '📈 **Price Filter:** Positive 24h change\n' +
-      '💰 **Market Cap Filter:** < $15M USD\n' +
-      '💧 **Liquidity Filter:** Min $10K USD\n' +
-      '⏰ **Pool Age Filter:** No pools > 24h old\n' +
+      '🤖 **PumpSwap Token Bot1 Started!**\n\n' +
+      '📊 **API Source:** PumpSwap API\n' +
+      '⏰ **Age Filter:** ≤ 6 hours old\n' +
+      '💧 **Liquidity Filter:** Min $1K USD\n' +
       '🔒 **Token-based Deduplication:** One signal per token\n' +
       '🚫 **Zero Duplicates:** Each token signaled exactly once\n\n' +
-      '#BotStarted #RaydiumGraduate #TokenDedup #AdvancedFilters',
+      '#BotStarted #PumpSwap #NewTokens #FreshSignals',
       { parse_mode: 'Markdown' }
     );
     
