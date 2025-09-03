@@ -306,9 +306,9 @@ function parsePoolAge(createdAt) {
   }
 }
 
-function isTokenNewEnough(ageInHours) {
-  const maxAgeHours = 6; // 6 hours
-  return ageInHours <= maxAgeHours;
+function isTokenNewEnough(ageInMinutes) {
+  const maxAgeMinutes = 30; // 30 minutes max
+  return ageInMinutes <= maxAgeMinutes;
 }
 
 // Axios with timeout wrapper
@@ -368,36 +368,95 @@ async function fetchNewPoolsFromPage(page) {
   }
 }
 
-async function fetchAllNewPools() {
+async function processTokensFromPage(page, tokensFoundCounter) {
   try {
-    console.log(`🔍 Fetching new pools from GeckoTerminal (pages 1-${MAX_PAGES})...`);
+    const pools = await fetchNewPoolsFromPage(page);
     
-    let allPumpSwapPools = [];
+    // Filter for PumpSwap pools on this page
+    const pumpSwapPoolsOnPage = pools.filter(pool => {
+      const dexId = pool.relationships?.dex?.data?.id;
+      return dexId === 'pumpswap';
+    });
     
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const pools = await fetchNewPoolsFromPage(page);
+    console.log(`🚀 PumpSwap pools on page ${page}: ${pumpSwapPoolsOnPage.length}`);
+    
+    // Process each pool immediately
+    for (let i = 0; i < pumpSwapPoolsOnPage.length; i++) {
+      const pool = pumpSwapPoolsOnPage[i];
       
-      // Filter for PumpSwap pools on this page
-      const pumpSwapPoolsOnPage = pools.filter(pool => {
-        const dexId = pool.relationships?.dex?.data?.id;
-        return dexId === 'pumpswap';
-      });
-      
-      console.log(`🚀 PumpSwap pools on page ${page}: ${pumpSwapPoolsOnPage.length}`);
-      allPumpSwapPools = allPumpSwapPools.concat(pumpSwapPoolsOnPage);
-      
-      // Add delay between requests to avoid rate limiting
-      if (page < MAX_PAGES) {
-        await sleep(REQUEST_DELAY);
+      try {
+        const poolData = extractPoolData(pool);
+        if (!poolData) {
+          console.log(`❌ Failed to extract data for pool ${i + 1} on page ${page}`);
+          continue;
+        }
+        
+        const { baseTokenAddress, baseToken, ageData, pricing, poolAddress } = poolData;
+        const symbol = baseToken.symbol;
+        
+        console.log(`\n[Page ${page}/${MAX_PAGES}, Pool ${i + 1}/${pumpSwapPoolsOnPage.length}] Processing: ${symbol} (${baseTokenAddress})`);
+        console.log(`📍 Pool: ${poolAddress}`);
+        console.log(`⏰ Age: ${ageData.ageString}`);
+        
+        // ATOMIC CHECK: Use token address for deduplication to prevent duplicate signals for same token
+        const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(baseTokenAddress, {
+          reason: 'pumpswap_processing',
+          symbol,
+          poolAddress,
+          age: ageData.ageString,
+          liquidity: pricing.reserveUsd
+        });
+        
+        if (wasAlreadyProcessed) {
+          console.log(`⏭️  Token ${baseTokenAddress} already processed/locked - skipping to prevent duplicate signal`);
+          continue;
+        }
+        
+        console.log(`🔒 Acquired exclusive lock for token ${baseTokenAddress} (pool: ${poolAddress}) - proceeding with filters...`);
+        
+        try {
+          // Filter: Check pool age (30 minutes or newer)
+          if (!isTokenNewEnough(ageData.ageInMinutes)) {
+            console.log(`⏰ Token is too old (${ageData.ageString}) - releasing lock`);
+            await releaseTokenLock(baseTokenAddress);
+            continue;
+          }
+          
+          // Filter: Check liquidity (minimum $1k)
+          if (pricing.reserveUsd < config.minLiquidity) {
+            console.log(`💧 Liquidity too low ($${pricing.reserveUsd.toLocaleString()} < $${config.minLiquidity.toLocaleString()}) - releasing lock`);
+            await releaseTokenLock(baseTokenAddress);
+            continue;
+          }
+          
+          console.log(`✅ ${symbol} passed all filters - sending signal immediately!`);
+          
+          // Send the signal immediately (token is already marked as processed from checkAndMarkTokenAsProcessed)
+          await sendPumpSwapTokenSignal(poolData);
+          tokensFoundCounter.count++;
+          
+          console.log(`🎯 Token ${baseTokenAddress} signal sent successfully! (Total found: ${tokensFoundCounter.count})`);
+          
+          // Release the lock after successful signal
+          await releaseTokenLock(baseTokenAddress);
+            
+        } catch (filterError) {
+          console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
+          // Always release lock on error
+          await releaseTokenLock(baseTokenAddress);
+        }
+        
+        // Rate limiting between tokens
+        await sleep(1000); // Reduced to 1 second for faster processing
+        
+      } catch (tokenError) {
+        console.error(`❌ Error processing pool ${i + 1} on page ${page}:`, tokenError.message);
+        continue;
       }
     }
     
-    console.log(`📊 Total PumpSwap pools found: ${allPumpSwapPools.length}`);
-    return allPumpSwapPools;
-    
   } catch (error) {
-    console.error('❌ Error fetching pools:', error.message);
-    return [];
+    console.error(`❌ Error processing page ${page}:`, error.message);
   }
 }
 
@@ -534,93 +593,34 @@ async function monitorPumpSwapTokens() {
     
     try {
       console.log(`\n🔄 Starting monitoring cycle #${cycleCount} at ${new Date().toLocaleTimeString()}`);
+      console.log(`🔍 Fetching and processing pools from GeckoTerminal (pages 1-${MAX_PAGES})...`);
       
-      const pumpSwapPools = await fetchAllNewPools();
+      const tokensFoundCounter = { count: 0 };
+      let hasProcessedAnyPage = false;
       
-      if (pumpSwapPools.length === 0) {
-        console.log('⏳ No new PumpSwap pools found');
+      // Process each page immediately as it's fetched
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        try {
+          await processTokensFromPage(page, tokensFoundCounter);
+          hasProcessedAnyPage = true;
+          
+          // Add delay between page requests to avoid rate limiting
+          if (page < MAX_PAGES) {
+            await sleep(REQUEST_DELAY);
+          }
+          
+        } catch (pageError) {
+          console.error(`❌ Error processing page ${page}:`, pageError.message);
+          continue;
+        }
+      }
+      
+      if (!hasProcessedAnyPage) {
+        console.log('⏳ No pages processed successfully');
         errorCount++;
       } else {
         errorCount = 0; // Reset error count on success
-        console.log(`📝 Processing ${pumpSwapPools.length} PumpSwap pools...`);
-        
-        let tokensFound = 0;
-        
-        for (let i = 0; i < pumpSwapPools.length; i++) {
-          const pool = pumpSwapPools[i];
-          
-          try {
-            const poolData = extractPoolData(pool);
-            if (!poolData) {
-              console.log(`❌ Failed to extract data for pool ${i + 1}`);
-              continue;
-            }
-            
-            const { baseTokenAddress, baseToken, ageData, pricing, poolAddress } = poolData;
-            const symbol = baseToken.symbol;
-            
-            console.log(`\n[${i + 1}/${pumpSwapPools.length}] Processing: ${symbol} (${baseTokenAddress})`);
-            console.log(`📍 Pool: ${poolAddress}`);
-            console.log(`⏰ Age: ${ageData.ageString}`);
-            
-            // ATOMIC CHECK: Use token address for deduplication to prevent duplicate signals for same token
-            const wasAlreadyProcessed = await checkAndMarkTokenAsProcessed(baseTokenAddress, {
-              reason: 'pumpswap_processing',
-              symbol,
-              poolAddress,
-              age: ageData.ageString,
-              liquidity: pricing.reserveUsd
-            });
-            
-            if (wasAlreadyProcessed) {
-              console.log(`⏭️  Token ${baseTokenAddress} already processed/locked - skipping to prevent duplicate signal`);
-              continue;
-            }
-            
-            console.log(`🔒 Acquired exclusive lock for token ${baseTokenAddress} (pool: ${poolAddress}) - proceeding with filters...`);
-            
-            try {
-              // Filter: Check pool age (6 hours or newer)
-              if (!isTokenNewEnough(ageData.ageInHours)) {
-                console.log(`⏰ Token is too old (${ageData.ageString}) - releasing lock`);
-                await releaseTokenLock(baseTokenAddress);
-                continue;
-              }
-              
-              // Filter: Check liquidity (minimum $1k)
-              if (pricing.reserveUsd < config.minLiquidity) {
-                console.log(`💧 Liquidity too low ($${pricing.reserveUsd.toLocaleString()} < $${config.minLiquidity.toLocaleString()}) - releasing lock`);
-                await releaseTokenLock(baseTokenAddress);
-                continue;
-              }
-              
-              console.log(`✅ ${symbol} passed all filters - sending signal!`);
-              
-              // Send the signal (token is already marked as processed from checkAndMarkTokenAsProcessed)
-              await sendPumpSwapTokenSignal(poolData);
-              tokensFound++;
-              
-              console.log(`🎯 Token ${baseTokenAddress} signal sent successfully!`);
-              
-              // Release the lock after successful signal
-              await releaseTokenLock(baseTokenAddress);
-                
-            } catch (filterError) {
-              console.error(`❌ Error during filtering for ${symbol}:`, filterError.message);
-              // Always release lock on error
-              await releaseTokenLock(baseTokenAddress);
-            }
-            
-            // Rate limiting between tokens
-            await sleep(2000);
-            
-          } catch (tokenError) {
-            console.error(`❌ Error processing token ${i + 1}:`, tokenError.message);
-            continue;
-          }
-        }
-        
-        console.log(`\n🎯 Found ${tokensFound} valid PumpSwap tokens`);
+        console.log(`\n🎯 Total valid PumpSwap tokens found and signaled: ${tokensFoundCounter.count}`);
       }
       
       const cycleTime = ((Date.now() - cycleStartTime) / 1000).toFixed(1);
