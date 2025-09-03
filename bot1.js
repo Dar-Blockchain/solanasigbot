@@ -642,7 +642,9 @@ async function main() {
   
   // Connect to Redis
   try {
-    await redisClient.connect();
+    if (!redisClient.isOpen) {
+      await redisClient.connect();
+    }
     const processedCount = await getProcessedTokensCount();
     console.log(`💾 Found ${processedCount} previously processed tokens in Redis Bot1 database`);
     
@@ -698,7 +700,7 @@ async function main() {
   }
   
   // Start monitoring
-  await monitorMeteoraPools();
+  await monitorPumpSwapTokens();
 }
 
 // Handle process termination
