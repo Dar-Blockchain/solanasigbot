@@ -307,7 +307,7 @@ function parsePoolAge(createdAt) {
 }
 
 function isTokenNewEnough(ageInMinutes) {
-  const maxAgeMinutes = 30; // 30 minutes max
+  const maxAgeMinutes = 360; // 30 minutes max
   return ageInMinutes <= maxAgeMinutes;
 }
 
