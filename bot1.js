@@ -46,7 +46,7 @@ validateEnvironment();
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN_BOT1, { polling: true });
 const CHANNEL_USERNAME = '@solmemebot2'; // New channel username for bot1
 
-const GECKOTERMINAL_API_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
+const GECKOTERMINAL_API_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/trending_pools';
 const MAX_PAGES = 10; // Monitor 100 pages
 const REQUEST_DELAY = 1000; // 1 second delay between requests
 const CYCLE_DELAY = 60000; // 60 seconds between monitoring cycles
@@ -345,7 +345,7 @@ async function fetchNewPoolsFromPage(page) {
     
     const response = await axiosWithTimeout({
       method: 'get',
-      url: `${GECKOTERMINAL_API_BASE}?include=dex&page=${page}`,
+      url: `${GECKOTERMINAL_API_BASE}?page=${page}&duration=6h&include=dex`,
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -358,7 +358,7 @@ async function fetchNewPoolsFromPage(page) {
     }
     
     const pools = response.data.data;
-    console.log(`📊 Found ${pools.length} pools on page ${page}`);
+    console.log(`📊 Found ${pools.length} trending pools on page ${page}`);
     
     return pools;
     
