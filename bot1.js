@@ -52,7 +52,7 @@ const REQUEST_DELAY = 1000; // 1 second delay between requests
 const CYCLE_DELAY = 60000; // 60 seconds between monitoring cycles
 
 const config = {
-  minLiquidity: parseInt(process.env.MIN_LIQUIDITY) || 1000, // Minimum $1k liquidity
+  minLiquidity: parseInt(process.env.MIN_LIQUIDITY) || 50000, // Minimum $50k liquidity
 };
 
 // ==============================
@@ -712,7 +712,7 @@ async function main() {
       '🤖 **PumpSwap Token Bot1 Started!**\n\n' +
       '📊 **API Source:** PumpSwap API\n' +
       '⏰ **Age Filter:** ≤ 6 hours old\n' +
-      '💧 **Liquidity Filter:** Min $1K USD\n' +
+      '💧 **Liquidity Filter:** Min $50K USD\n' +
       '🔒 **Token-based Deduplication:** One signal per token\n' +
       '🚫 **Zero Duplicates:** Each token signaled exactly once\n\n' +
       '#BotStarted #PumpSwap #NewTokens #FreshSignals',
